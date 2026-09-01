@@ -1,0 +1,11 @@
+{
+  "title": "The Circuit Board",
+  "tagline": "A living PCB. Pulses stream the traces from the center chip; Space flies the cinematic camera through it.",
+  "reserve": [
+    {"cell": "D2", "span": [6, 6]},
+    {"cell": "A1", "span": [2, 1]},
+    {"cell": "J1", "span": [3, 2]},
+    {"cell": "A7", "span": [3, 2]},
+    {"cell": "J8", "span": [3, 1]}
+  ]
+}

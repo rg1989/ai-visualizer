@@ -1,0 +1,608 @@
+/*
+ * ai-visualizer: give your AI agent a face.
+ * Copyright (C) 2026 Jared Rhodenizer
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as published
+ * by the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ */
+/* ============================================================
+   glass-theme.css — the design language of the glass, as tokens.
+
+   Tokens, not a kit: card chrome and every component consume ONLY
+   these variables, which is what keeps eight hand-rolled components
+   looking like one system. Override a token to reskin the lot.
+
+   Blur is opt-in and OFF by default: every shipped face repaints a
+   full-viewport canvas each frame, and backdrop-filter over a moving
+   backdrop makes the compositor re-blur continuously — several cards
+   up can visibly drop the face's frame rate on always-on hardware.
+   Opting in = override --glass-blur (e.g. 8px; cost scales with the
+   radius) and lower the bg alpha to taste.
+   ============================================================ */
+
+:root {
+  --glass-bg: rgba(4, 12, 8, .85);          /* solid translucent dark */
+  --glass-line: #35e0ff;                    /* the cyan hairline */
+  --glass-line-dim: rgba(53, 224, 255, .28);
+  --glass-text: #dce8e4;
+  --glass-text-dim: #7a938c;
+  --glass-accent: #3ddc84;
+  --glass-radius: 8px;
+  --glass-radius-sm: 3px;
+  --glass-blur: 0;
+  --glass-gutter: 12px;                     /* §2: grid gutter */
+  --glass-margin: 24px;                     /* §2: outer margin */
+  --glass-title-font: "VT323", "SF Mono", Menlo, Consolas, monospace;
+  --glass-body-font: -apple-system, BlinkMacSystemFont, "Segoe UI",
+                     system-ui, sans-serif;
+}
+
+/* VT323 ships in assets/ — no hotlinking, works from file:// */
+@font-face {
+  font-family: "VT323";
+  src: url("assets/VT323-Regular.ttf") format("truetype");
+  font-display: swap;
+}
+
+/* ------------------------------ the layer ------------------------------ */
+/* 12×8 fractional grid over the whole viewport. The layer itself ignores
+   the pointer so the face underneath stays clickable between cards; each
+   card turns events back on (maps pan, iframes scroll). z-index sits
+   above every face's HUD (max 10) and below core.js's SND button (50). */
+#glass-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: grid;
+  grid-template-columns: repeat(12, 1fr);
+  grid-template-rows: repeat(8, 1fr);
+  gap: var(--glass-gutter);
+  padding: var(--glass-margin);
+  pointer-events: none;
+  font-family: var(--glass-body-font);
+}
+
+/* ------------------------------ card chrome ---------------------------- */
+.glass-card {
+  pointer-events: auto;
+  cursor: auto;             /* faces set cursor:none page-wide; an
+                               interactive card needs the pointer back */
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;            /* clip inside the grid cell, never blow it out */
+  overflow: hidden;
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-line);
+  border-radius: var(--glass-radius);
+  color: var(--glass-text);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+}
+
+.glass-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 10px 2px;
+  border-bottom: 1px solid var(--glass-line-dim);
+  font-family: var(--glass-title-font);
+  font-size: 18px;
+  line-height: 1.2;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--glass-line);
+  white-space: nowrap;
+}
+.glass-title {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* iframe cards carry their src host here — a refused cross-origin embed
+   is a blank the page cannot detect, so the label lives in the chrome */
+.glass-host {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 14px;
+  color: var(--glass-text-dim);
+}
+.glass-id {
+  flex: 0 0 auto;
+  margin-left: auto;        /* ghosted right */
+  opacity: .38;
+  font-size: 14px;
+}
+
+/* the close button: every card can be dismissed by whoever is looking at
+   it, with a mouse or with a pinch — the hand cursor synthesizes a real
+   click, so this needs no gesture of its own. Sized for a hand-tracked
+   cursor's jitter, not for a mouse's precision. */
+.glass-x {
+  flex: 0 0 auto;
+  margin-left: 6px;
+  width: 22px;
+  height: 22px;
+  align-self: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font: inherit;
+  font-size: 20px;
+  line-height: 1;
+  color: var(--glass-text-dim);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--glass-radius-sm);
+  cursor: pointer;
+  opacity: .5;
+  transition: opacity .15s, color .15s, border-color .15s, background .15s;
+}
+.glass-x:hover, .glass-x:focus-visible {
+  opacity: 1;
+  color: var(--glass-line);
+  border-color: var(--glass-line-dim);
+  background: rgba(255, 255, 255, .06);
+}
+
+.glass-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 8px 10px;
+  overflow: auto;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+/* the single degraded mode: a labeled placeholder, never a naked blank */
+.glass-fallback {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 10px;
+  color: var(--glass-text-dim);
+}
+
+/* ------------------------------ components ----------------------------- */
+/* note — markdown subset */
+.glass-note .glass-body p { margin: 0 0 .5em; }
+.glass-note .glass-body ul,
+.glass-note .glass-body ol { margin: 0 0 .5em; padding-left: 1.3em; }
+.glass-note .glass-body li { margin: .12em 0; }
+.glass-note .glass-body code,
+.glass-note .glass-body pre {
+  font-family: "SF Mono", Menlo, Consolas, monospace;
+  font-size: 12px;
+  color: var(--glass-accent);
+  background: rgba(0, 0, 0, .35);
+  border-radius: var(--glass-radius-sm);
+}
+.glass-note .glass-body code { padding: 0 .3em; }
+.glass-note .glass-body pre { margin: 0 0 .5em; padding: 6px 8px; overflow: auto; }
+
+/* image — letterboxed */
+.glass-image .glass-body {
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  background: rgba(0, 0, 0, .35);
+  overflow: hidden;
+}
+.glass-image img {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+.glass-caption {
+  flex: 0 0 auto;
+  align-self: stretch;
+  padding: 3px 8px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--glass-text-dim);
+}
+
+/* map / iframe / html — the body IS the frame */
+.glass-map .glass-body,
+.glass-iframe .glass-body,
+.glass-html .glass-body { padding: 0; overflow: hidden; }
+.glass-card iframe {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+}
+
+/* timer — big countdown, VT323. Container units size the numerals to the
+   card, so "enlarge it" grows the digits too; scoped to the timer card so
+   size containment cannot surprise any other component. */
+.glass-timer { container-type: size; }
+.glass-timer .glass-body {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  overflow: hidden;
+}
+.glass-timer-big {
+  font-family: var(--glass-title-font);
+  font-size: clamp(30px, 34cqmin, 120px);
+  line-height: 1;
+  color: var(--glass-text);
+}
+.glass-timer-done { color: var(--glass-accent); }
+.glass-timer-label {
+  font-family: var(--glass-title-font);
+  font-size: clamp(13px, 9cqmin, 22px);
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--glass-text-dim);
+}
+
+/* list — checklist, CSS check boxes (no glyph-coverage gamble) */
+.glass-li { display: flex; align-items: baseline; gap: 7px; margin: .18em 0; }
+.glass-check {
+  flex: 0 0 auto;
+  width: .75em;
+  height: .75em;
+  align-self: center;
+  border: 1px solid var(--glass-line);
+  border-radius: 2px;
+}
+.glass-li.done .glass-check {
+  background: var(--glass-accent);
+  border-color: var(--glass-accent);
+}
+.glass-li.done .glass-li-text {
+  color: var(--glass-text-dim);
+  text-decoration: line-through;
+}
+
+/* calendar — static month/week grid */
+.glass-cal { display: flex; flex-direction: column; height: 100%; font-size: 11px; }
+.cal-head {
+  flex: 0 0 auto;
+  text-align: center;
+  padding-bottom: 4px;
+  font-family: var(--glass-title-font);
+  font-size: 15px;
+  letter-spacing: .1em;
+  color: var(--glass-line);
+}
+.cal-grid {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  grid-auto-rows: 1fr;
+  gap: 2px;
+}
+.cal-week { grid-template-rows: 1fr; }
+.cal-dow {
+  text-align: center;
+  font-size: 10px;
+  letter-spacing: .1em;
+  color: var(--glass-text-dim);
+  align-self: end;
+}
+.cal-day {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  padding: 1px 3px;
+  /* derived from the hairline token so every theme's calendar matches */
+  border: 1px solid color-mix(in srgb, var(--glass-line) 12%, transparent);
+  border-radius: 2px;
+}
+.cal-day.cal-out { opacity: .35; }
+/* a day cell is a button as well as a drag handle — say so, quietly */
+.cal-day.glass-tap:hover {
+  border-color: color-mix(in srgb, var(--glass-accent) 50%, transparent);
+}
+.cal-day.cal-today { border-color: var(--glass-accent); }
+.cal-day.cal-today .cal-num { color: var(--glass-accent); }
+.cal-num { font-size: 10px; color: var(--glass-text-dim); }
+.cal-ev {
+  font-size: 10px;
+  color: var(--glass-accent);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* the hour view — one day, opened by tapping its cell in the grid */
+.cal-head { position: relative; }
+.cal-back {
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  padding: 0 6px;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 17px;
+  line-height: 1;
+  color: var(--glass-text-dim);
+}
+.cal-back:hover { color: var(--glass-accent); }
+.cal-hours {
+  position: relative;      /* offsetTop is measured against this */
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+.cal-hour {
+  display: grid;
+  grid-template-columns: 22px 1fr;
+  gap: 5px;
+  align-items: start;
+  min-height: 15px;
+  padding: 1px 0;
+  border-top: 1px solid color-mix(in srgb, var(--glass-line) 10%, transparent);
+}
+.cal-hour.cal-allday { border-top: 0; }
+.cal-hr {
+  font-size: 10px;
+  color: var(--glass-text-dim);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+/* the current hour gets the accent, and the label says which — colour is
+   never the only carrier (same rule the status card follows) */
+.cal-hour.cal-now { border-top-color: var(--glass-accent); }
+.cal-hour.cal-now .cal-hr { color: var(--glass-accent); }
+.cal-hslot { min-width: 0; }
+
+/* anything inside a card that answers a tap: the card is a drag handle, so
+   the pointer is the only hint that this one is also a control */
+.glass-tap { cursor: pointer; }
+
+/* events outside the rendered month/week: counted, never silently dropped */
+.cal-more {
+  flex: 0 0 auto;
+  text-align: center;
+  padding-top: 2px;
+  font-size: 10px;
+  color: var(--glass-text-dim);
+}
+
+/* -------------------------------- motion ------------------------------- */
+/* Enter: scale+fade with the one-beat cyan hairline flash (both ride ONE
+   animation property — two classes each setting `animation` would cancel
+   each other, so the enter includes its own flash). */
+@keyframes glass-enter {
+  from { opacity: 0; transform: scale(.96); }
+  to   { opacity: 1; transform: scale(1); }
+}
+@keyframes glass-flash {
+  0%   { border-color: color-mix(in srgb, var(--glass-line) 45%, white);
+         box-shadow: 0 0 14px var(--glass-line),
+                     inset 0 0 10px
+                       color-mix(in srgb, var(--glass-line) 30%, transparent); }
+  100% { border-color: var(--glass-line); box-shadow: none; }
+}
+.glass-enter { animation: glass-enter 240ms ease-out,
+                          glass-flash 220ms ease-out; }
+/* Replace: no re-entrance — just the materialize beat on the hairline */
+.glass-flash { animation: glass-flash 220ms ease-out; }
+@keyframes glass-exit {
+  to { opacity: 0; transform: scale(.98); }
+}
+.glass-exit { animation: glass-exit 180ms ease-in forwards; pointer-events: none; }
+/* the last-10s pre-fade pulse — disappearance must never feel like a glitch */
+@keyframes glass-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: .55; }
+}
+.glass-expiring { animation: glass-pulse 1.4s ease-in-out infinite; }
+/* poll outage ≥ ~5s: hairlines dim as the stale cue (§8) */
+.glass-stale .glass-card { border-color: var(--glass-line-dim); }
+
+@media (prefers-reduced-motion: reduce) {
+  .glass-enter, .glass-flash, .glass-expiring { animation: none; }
+  /* glass.js removes exiting nodes on a timeout too; keep them invisible
+     rather than letting a dead card flash back for one frame */
+  .glass-exit { animation: none; opacity: 0; }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  :root { --glass-bg: rgb(4, 12, 8); --glass-blur: 0; }
+}
+
+/* ============================================================
+   .glass-player — the Winamp-shaped skin.
+
+   Every colour is a theme token, so the same skin reads as JARVIS
+   sky-blue or SHODAN green without a second stylesheet:
+   --wa-ink is the LCD phosphor, --wa-face the plastic, and the bevels
+   are that plastic mixed toward the hairline (lit) or toward black
+   (shadowed) — which is exactly how the original skin was drawn.
+
+   The spectrum is CSS keyframes, not audio: the embed is cross-origin,
+   so its samples are unreachable from this page. It runs while the
+   player reports playing and freezes when it doesn't, which is the
+   honest amount of truth available here.
+   ============================================================ */
+.glass-player .glass-body { padding: 0; overflow: hidden; }
+
+.glass-player .wa {
+  --wa-ink: var(--glass-accent);
+  --wa-face: color-mix(in srgb, var(--glass-line) 13%, var(--glass-bg));
+  --wa-hi: color-mix(in srgb, var(--glass-line) 30%, transparent);
+  --wa-lo: rgba(0, 0, 0, .6);
+  --wa-lcd: color-mix(in srgb, var(--glass-bg) 70%, #000);
+  display: flex; flex-direction: column; height: 100%;
+  background: var(--wa-face);
+  font-family: var(--glass-title-font);
+}
+
+/* the embed. In audio mode it is laid out and clipped, never display:none
+   — a frame that is not rendered is a frame the browser may refuse to
+   start. In video mode the same element simply gets the room. */
+.glass-player .wa-stage {
+  flex: 0 0 0; height: 0; overflow: hidden; position: relative;
+  background: #000;
+}
+.glass-player .wa-stage iframe {
+  position: absolute; top: 0; left: 0; width: 320px; height: 180px;
+  border: 0;
+}
+.glass-player .wa-vid .wa-stage {
+  flex: 1 1 auto; height: auto; min-height: 90px;
+  border-bottom: 1px solid var(--wa-hi);
+}
+.glass-player .wa-vid .wa-stage iframe { position: absolute; inset: 0;
+  width: 100%; height: 100%; }
+
+/* the LCD */
+.glass-player .wa-screen {
+  display: flex; align-items: stretch; gap: 8px;
+  padding: 7px 9px; margin: 7px 7px 0;
+  background: var(--wa-lcd);
+  border-radius: var(--glass-radius-sm);
+  border-top: 1px solid var(--wa-lo); border-left: 1px solid var(--wa-lo);
+  border-bottom: 1px solid var(--wa-hi); border-right: 1px solid var(--wa-hi);
+}
+.glass-player .wa-time {
+  font: 400 clamp(17px, 3.4cqw, 30px)/1 "SF Mono", Menlo, Consolas, monospace;
+  font-variant-numeric: tabular-nums; letter-spacing: .04em;
+  color: var(--wa-ink); text-shadow: 0 0 9px var(--wa-ink);
+  align-self: center; min-width: 4.4ch;
+}
+.glass-player .wa-meta {
+  flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column;
+  justify-content: center; gap: 3px;
+}
+.glass-player .wa-marquee { overflow: hidden; white-space: nowrap; }
+.glass-player .wa-marquee span {
+  display: inline-block; font-size: 12px; letter-spacing: .04em;
+  color: var(--wa-ink);
+}
+.glass-player .wa-marquee.run span {
+  animation: wa-scroll 7s ease-in-out infinite alternate;
+}
+.glass-player .wa-badges {
+  font-size: 9px; letter-spacing: .16em; color: var(--glass-text-dim);
+  white-space: nowrap; overflow: hidden;
+}
+.glass-player .wa-viz {
+  display: flex; align-items: flex-end; gap: 1px;
+  width: 33%; max-width: 130px; min-width: 46px;
+}
+.glass-player .wa-viz i {
+  flex: 1 1 0; min-width: 2px; height: 10%;
+  background: linear-gradient(to top,
+    var(--wa-ink), color-mix(in srgb, var(--wa-ink) 25%, var(--glass-text)));
+  animation-name: wa-bounce; animation-iteration-count: infinite;
+  animation-direction: alternate; animation-timing-function: ease-in-out;
+  animation-play-state: paused;
+}
+.glass-player .wa-on .wa-viz i { animation-play-state: running; }
+
+/* seek + transport */
+.glass-player .wa-seek, .glass-player .wa-vol {
+  -webkit-appearance: none; appearance: none;
+  background: var(--wa-lcd); height: 9px; border-radius: 0;
+  border-top: 1px solid var(--wa-lo); border-left: 1px solid var(--wa-lo);
+  border-bottom: 1px solid var(--wa-hi); border-right: 1px solid var(--wa-hi);
+  cursor: pointer;
+}
+.glass-player .wa-seek { margin: 7px 8px 0; }
+.glass-player .wa-vol { flex: 1 1 46px; min-width: 40px; }
+.glass-player .wa-seek::-webkit-slider-thumb,
+.glass-player .wa-vol::-webkit-slider-thumb {
+  -webkit-appearance: none; width: 13px; height: 13px; margin-top: -3px;
+  background: var(--wa-ink); border-radius: 1px;
+  box-shadow: 0 0 7px var(--wa-ink), inset 0 -4px 0 var(--wa-lo);
+}
+.glass-player .wa-seek::-moz-range-thumb,
+.glass-player .wa-vol::-moz-range-thumb {
+  width: 13px; height: 13px; border: 0; border-radius: 1px;
+  background: var(--wa-ink); box-shadow: 0 0 7px var(--wa-ink);
+}
+.glass-player .wa-deck {
+  display: flex; align-items: center; gap: 8px; padding: 7px 8px;
+}
+.glass-player .wa-btns { display: flex; gap: 3px; }
+.glass-player .wa-b, .glass-player .wa-t {
+  font: inherit; cursor: pointer; color: var(--glass-text);
+  background: var(--wa-face);
+  border-top: 1px solid var(--wa-hi); border-left: 1px solid var(--wa-hi);
+  border-bottom: 1px solid var(--wa-lo); border-right: 1px solid var(--wa-lo);
+  border-radius: var(--glass-radius-sm);
+  transition: color .15s, box-shadow .15s;
+}
+.glass-player .wa-b { font-size: 12px; padding: 3px 7px; line-height: 1; }
+.glass-player .wa-t { font-size: 8px; letter-spacing: .12em; padding: 4px 5px;
+  color: var(--glass-text-dim); }
+.glass-player .wa-b:hover, .glass-player .wa-t:hover { color: var(--wa-ink); }
+.glass-player .wa-b:active, .glass-player .wa-t.on {
+  border-top-color: var(--wa-lo); border-left-color: var(--wa-lo);
+  border-bottom-color: var(--wa-hi); border-right-color: var(--wa-hi);
+}
+.glass-player .wa-t.on { color: var(--wa-ink); text-shadow: 0 0 7px var(--wa-ink); }
+/* nothing is rolling yet (autoplay blocked, or paused): say so */
+.glass-player .wa-b.wa-need {
+  color: var(--wa-ink); animation: wa-need 1.5s ease-in-out infinite;
+}
+.glass-player .wa-tog { display: flex; gap: 3px; }
+
+/* the playlist editor */
+.glass-player .wa-pl {
+  flex: 1 1 auto; min-height: 0; overflow-y: auto; list-style: none;
+  margin: 0 7px 7px; padding: 4px 0;
+  background: var(--wa-lcd);
+  border-radius: var(--glass-radius-sm);
+  border-top: 1px solid var(--wa-lo); border-left: 1px solid var(--wa-lo);
+  border-bottom: 1px solid var(--wa-hi); border-right: 1px solid var(--wa-hi);
+}
+.glass-player .wa-vid .wa-pl { flex: 0 1 auto; max-height: 34%; }
+.glass-player .wa-row {
+  display: flex; align-items: baseline; gap: 7px; cursor: pointer;
+  padding: 2px 8px; font-size: 11px; color: var(--glass-text-dim);
+  white-space: nowrap;
+}
+.glass-player .wa-row b { font-weight: 400; opacity: .6; min-width: 2ch; }
+.glass-player .wa-row .wa-rt { flex: 1 1 auto; overflow: hidden;
+  text-overflow: ellipsis; }
+.glass-player .wa-row em { font-style: normal; opacity: .55;
+  font-variant-numeric: tabular-nums; }
+.glass-player .wa-row:hover { color: var(--glass-text); }
+.glass-player .wa-row.on {
+  color: var(--wa-ink); text-shadow: 0 0 7px var(--wa-ink);
+  background: color-mix(in srgb, var(--wa-ink) 9%, transparent);
+}
+
+@keyframes wa-bounce { from { height: 7%; } to { height: 100%; } }
+@keyframes wa-scroll { 0%, 12%  { transform: translateX(0); }
+                       88%, 100% { transform: translateX(var(--wa-run, 0)); } }
+@keyframes wa-need   { 0%, 100% { opacity: .45; } 50% { opacity: 1; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .glass-player .wa-viz i { animation: none; height: 40%; }
+  .glass-player .wa-marquee.run span,
+  .glass-player .wa-b.wa-need { animation: none; }
+}

@@ -1,0 +1,12 @@
+{
+  "title": "Neural Core",
+  "tagline": "A constellation brain: nine labeled color islands, a white crescent, traveling thought-pulses, and a CORTEX STATUS panel wired to the real states.",
+  "reserve": [
+    {"cell": "A1", "span": [12, 1]},
+    {"cell": "D2", "span": [6, 6]},
+    {"cell": "L2", "span": [1, 4]},
+    {"cell": "A8", "span": [2, 1]},
+    {"cell": "F8", "span": [2, 1]},
+    {"cell": "K8", "span": [2, 1]}
+  ]
+}

@@ -1,0 +1,81 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0d1b2e"/>
+      <stop offset="1" stop-color="#060d18"/>
+    </linearGradient>
+    <radialGradient id="coreGlow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#aef4ff"/>
+      <stop offset="0.35" stop-color="#4fd8f7"/>
+      <stop offset="1" stop-color="#4fd8f7" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="14" result="b"/>
+      <feMerge>
+        <feMergeNode in="b"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="softglow" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="26" result="b"/>
+      <feMerge>
+        <feMergeNode in="b"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- macOS squircle-ish background -->
+  <rect x="60" y="60" width="904" height="904" rx="204" fill="url(#bg)"/>
+
+  <!-- faint pcb grid traces in background -->
+  <g stroke="#16324e" stroke-width="6" fill="none" opacity="0.9">
+    <path d="M 200 830 H 400 L 470 760"/>
+    <path d="M 824 194 H 640 L 585 249"/>
+    <path d="M 194 330 H 300 L 360 390"/>
+    <path d="M 830 640 H 700 L 655 595"/>
+  </g>
+  <g fill="#16324e">
+    <circle cx="200" cy="830" r="12"/>
+    <circle cx="824" cy="194" r="12"/>
+    <circle cx="194" cy="330" r="12"/>
+    <circle cx="830" cy="640" r="12"/>
+  </g>
+
+  <!-- outer ring -->
+  <circle cx="512" cy="512" r="260" fill="none" stroke="#2a688f" stroke-width="10" opacity="0.85"/>
+
+  <!-- glowing arc segments on the ring -->
+  <g fill="none" stroke="#5fe0ff" stroke-width="26" stroke-linecap="round" filter="url(#glow)">
+    <path d="M 512 252 A 260 260 0 0 1 736 382"/>
+    <path d="M 736 642 A 260 260 0 0 1 512 772"/>
+    <path d="M 288 642 A 260 260 0 0 1 252 512"/>
+  </g>
+  <g fill="none" stroke="#2a86b8" stroke-width="26" stroke-linecap="round">
+    <path d="M 288 382 A 260 260 0 0 1 380 296"/>
+  </g>
+
+  <!-- circuit traces radiating from core -->
+  <g stroke="#4fd8f7" stroke-width="12" fill="none" filter="url(#glow)">
+    <path d="M 512 400 V 330"/>
+    <path d="M 512 624 V 694"/>
+    <path d="M 400 512 H 330"/>
+    <path d="M 624 512 H 694"/>
+    <path d="M 591 433 L 641 383"/>
+    <path d="M 433 591 L 383 641"/>
+  </g>
+  <g fill="#aef4ff" filter="url(#glow)">
+    <circle cx="512" cy="330" r="16"/>
+    <circle cx="512" cy="694" r="16"/>
+    <circle cx="330" cy="512" r="16"/>
+    <circle cx="694" cy="512" r="16"/>
+    <circle cx="641" cy="383" r="14"/>
+    <circle cx="383" cy="641" r="14"/>
+  </g>
+
+  <!-- core -->
+  <circle cx="512" cy="512" r="150" fill="url(#coreGlow)" opacity="0.55"/>
+  <circle cx="512" cy="512" r="112" fill="none" stroke="#5fe0ff" stroke-width="14" filter="url(#softglow)"/>
+  <circle cx="512" cy="512" r="58" fill="#0a1622" stroke="#aef4ff" stroke-width="10" filter="url(#glow)"/>
+  <circle cx="512" cy="512" r="22" fill="#d9faff" filter="url(#softglow)"/>
+</svg>

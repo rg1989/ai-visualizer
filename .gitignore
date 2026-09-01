@@ -1,0 +1,11 @@
+# Component .gitignore files still apply inside their own folders --
+# backtalk/.gitignore keeps the 1.7G .venv out, and each piece keeps its
+# own config (backtalk.json, ai-visualizer.json, barehands.json) untracked
+# on purpose, so an update can never clobber it.
+__pycache__/
+*.log
+.DS_Store
+# jarvisctl's pidfile — the running agent's process id, written at launch and
+# removed on stop. It was TRACKED, so every start and stop showed up as a repo
+# edit, and a clean checkout shipped somebody else's stale pid.
+.jarvis.pid

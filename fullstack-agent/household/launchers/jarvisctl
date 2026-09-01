@@ -1,0 +1,78 @@
+#!/bin/bash
+# "AI Visualizer.app"'s process owner and stop button.
+#
+#   jarvisctl run [launcher]   become the agent (exec'd inside iTerm by the app)
+#   jarvisctl status           the agent's pid, or 0
+#   jarvisctl stop             take the whole tree down
+#   jarvisctl build            rebuild the .app from the .applescript
+#
+# ponytail: `run` exec's one of the existing .command launchers rather than
+# re-declaring its env, so editing those still works and the GLM variant is
+# just a different argument. exec keeps this pid, so the pidfile stays true.
+PIDFILE="$HOME/my-agent/.jarvis.pid"
+HERE="$(cd "$(dirname "$0")" && pwd)"
+APP="$HOME/Applications/AI Visualizer.app"
+LAUNCHER="${2:-$HOME/my-agent/launchers/Talk to Jarvis.command}"
+
+alive() {
+  local p; p=$(cat "$PIDFILE" 2>/dev/null)
+  if [ -n "$p" ] && kill -0 "$p" 2>/dev/null; then echo "$p"; else echo 0; fi
+}
+
+case "$1" in
+  run)
+    [ -x "$LAUNCHER" ] || { echo "no launcher at: $LAUNCHER"; exit 1; }
+    echo $$ > "$PIDFILE"
+    exec "$LAUNCHER"
+    ;;
+  status)
+    alive
+    ;;
+  build)
+    # osacompile regenerates the WHOLE bundle, stock applet icon included,
+    # so the icon has to go back afterwards or every edit to the applescript
+    # silently costs you the Dock icon. That is why this is a verb and not
+    # a command in a comment.
+    [ "$(alive)" = 0 ] || { echo "quit Jarvis first (Cmd-Q) — it is running"; exit 1; }
+    # from scratch: osacompile REUSES an existing bundle and then warns
+    # that -s "will be ignored" -- build over a non-stay-open bundle and
+    # you silently get an applet that no longer owns the process tree.
+    rm -rf "$APP"
+    osacompile -s -o "$APP" "$HERE/Jarvis.applescript" || exit 1
+    cp "$HERE/Jarvis.icns" "$APP/Contents/Resources/applet.icns"
+    # ...and the two things osacompile leaves behind that quietly BEAT that
+    # copy. Both were live: the icon was installed correctly and the Dock
+    # showed the stock applet page anyway.
+    #
+    # 1. CFBundleIconName. Modern macOS resolves the icon through this key
+    #    and Assets.car BEFORE it ever looks at CFBundleIconFile, and
+    #    osacompile ships an Assets.car holding the stock applet icon. The
+    #    cp above landed on a file nothing was reading.
+    /usr/libexec/PlistBuddy -c "Delete :CFBundleIconName" \
+      "$APP/Contents/Info.plist" >/dev/null 2>&1
+    # 2. The code signature. osacompile seals the bundle; editing a sealed
+    #    resource invalidates the seal ("a sealed resource is missing or
+    #    invalid"), which is independently enough to get a generic icon.
+    #    Ad-hoc, because there was no signing identity here to begin with.
+    codesign --force --sign - "$APP" >/dev/null 2>&1
+    # the Finder/Dock icon cache keys on the bundle's mtime
+    touch "$APP"
+    echo "built $APP"
+    ;;
+  stop)
+    p=$(alive)
+    [ "$p" = 0 ] && { rm -f "$PIDFILE"; exit 0; }
+    # the whole group: start.sh's trap only reaps the servers, not backtalk
+    g=$(ps -o pgid= -p "$p" | tr -d ' ')
+    kill -TERM "-$g" 2>/dev/null
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      kill -0 "$p" 2>/dev/null || break
+      sleep 0.3
+    done
+    kill -0 "$p" 2>/dev/null && kill -KILL "-$g" 2>/dev/null
+    rm -f "$PIDFILE"
+    ;;
+  *)
+    echo "usage: jarvisctl run|status|stop|build [launcher]"; exit 2
+    ;;
+esac

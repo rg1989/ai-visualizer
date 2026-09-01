@@ -1,0 +1,21 @@
+.DS_Store
+__pycache__/
+*.pyc
+.voice_state
+.voice_waveform
+.voice_loading_pid
+.voice_alert
+# your personal config, created at setup: never tracked, never touched by updates
+ai-visualizer.json
+# the glass's pinned items + id counter, written by server.py at runtime
+glass-state.json
+# the live theme choice, written by server.py at runtime (POST /theme)
+.face_theme
+.face_theme.tmp
+# the face player's "sound is coming out of me" note (POST /media),
+# read by the voice line to require the wake word while music plays
+.voice_media
+# private themes -- a theme is just a folder (themes/README.md), so one
+# ignore line is the whole switch. Nothing else has to know it exists:
+#   themes/mybrand/
+#   faces/mybrand/

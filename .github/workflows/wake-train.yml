@@ -120,8 +120,11 @@ jobs:
       - name: train
         run: |
           sed -e "s/^steps: .*/steps: ${{ needs.params.outputs.steps }}/" shodan.yml > train.yml
-          python openwakeword/openwakeword/train.py --training_config train.yml --train_model 2>&1 | tee train.log | tail -60
-          find out -name "*.onnx" -exec ls -la {} \;
+          # train.py exports out/shodan.onnx and THEN crashes in an unconditional tflite
+          # conversion (onnx_tf has no wheel here). The model file is the pass/fail.
+          python openwakeword/openwakeword/train.py --training_config train.yml --train_model 2>&1 | tee train.log | tail -60 || true
+          grep -E "Final Model" train.log
+          test -s out/shodan.onnx && ls -la out/shodan.onnx
       - uses: actions/upload-artifact@v4
         if: always()
         with:

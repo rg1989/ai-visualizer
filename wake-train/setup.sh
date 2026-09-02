@@ -5,7 +5,7 @@ cd "$(dirname "$0")"
 sudo apt-get update -qq >/dev/null && sudo apt-get install -y -qq espeak-ng >/dev/null
 pip install -q --upgrade pip
 pip install -q torch==2.8.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cpu
-pip install -q "numpy>=2,<3" scipy soundfile pyarrow pyyaml tqdm onnx onnxruntime \
+pip install -q "numpy>=2,<3" "scipy<1.17" soundfile pyarrow pyyaml tqdm onnx onnxruntime \
   scikit-learn requests speechbrain==0.5.14 audiomentations==0.33.0 torch-audiomentations==0.11.0 \
   acoustics==0.2.6 pronouncing==0.2.0 deep-phonemizer==0.0.19 mutagen==1.47.0 torchinfo==1.8.0 \
   torchmetrics==1.2.0 webrtcvad piper-tts==1.3.0

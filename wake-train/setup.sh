@@ -15,10 +15,10 @@ pip install -q -e ./openwakeword --no-deps
 [ -d piper-sample-generator ] || git clone -q --branch v3.2.0 --depth 1 https://github.com/rhasspy/piper-sample-generator
 cp generate_samples.py piper-sample-generator/generate_samples.py
 mkdir -p piper-sample-generator/models
-[ -s piper-sample-generator/models/en_US-libritts_r-medium.pt ] || curl -sSL -o piper-sample-generator/models/en_US-libritts_r-medium.pt \
+[ -s piper-sample-generator/models/en_US-libritts_r-medium.pt ] || curl -fsSL --create-dirs -o piper-sample-generator/models/en_US-libritts_r-medium.pt \
   https://github.com/rhasspy/piper-sample-generator/releases/download/v2.0.0/en_US-libritts_r-medium.pt
 for f in embedding_model.onnx melspectrogram.onnx; do
-  [ -s openwakeword/openwakeword/resources/models/$f ] || curl -sSL -o openwakeword/openwakeword/resources/models/$f \
+  [ -s openwakeword/openwakeword/resources/models/$f ] || curl -fsSL --create-dirs -o openwakeword/openwakeword/resources/models/$f \
     https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/$f
 done
 ls -la piper-sample-generator/models/ openwakeword/openwakeword/resources/models/

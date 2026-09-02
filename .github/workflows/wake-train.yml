@@ -57,7 +57,7 @@ jobs:
       fail-fast: true
       matrix:
         shard: [0, 1, 2, 3]
-    defaults: { run: { working-directory: wake-train } }
+    defaults: { run: { working-directory: wake-train, shell: bash } }  # shell: bash => pipefail
     steps:
       - uses: actions/checkout@v4
         if: ${{ matrix.shard < fromJSON(needs.params.outputs.shards) }}
@@ -75,6 +75,7 @@ jobs:
           sed -e "s/^n_samples: .*/n_samples: $((tot / n))/" \
               -e "s/^n_samples_val: .*/n_samples_val: $((tot / n / 10))/" shodan.yml > shard.yml
           grep -E "^n_samples" shard.yml
+          mkdir -p data/mit_rirs data/background   # train.py scans these at startup even when only generating
           python openwakeword/openwakeword/train.py --training_config shard.yml --generate_clips 2>&1 | tail -40
           for d in out/shodan/*/; do echo "$d $(ls "$d" | wc -l)"; done
           tar cf clips.tar out
@@ -90,7 +91,7 @@ jobs:
     needs: [params, gen]
     runs-on: ubuntu-latest
     timeout-minutes: 355
-    defaults: { run: { working-directory: wake-train } }
+    defaults: { run: { working-directory: wake-train, shell: bash } }  # shell: bash => pipefail
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

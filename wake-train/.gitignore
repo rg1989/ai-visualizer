@@ -1,0 +1,7 @@
+piper-sample-generator/
+openwakeword/
+out/
+data/
+shards/
+smoke_out/
+*.log

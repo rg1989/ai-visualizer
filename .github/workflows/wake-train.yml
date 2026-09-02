@@ -1,0 +1,107 @@
+# Trains the "shodan" openWakeWord model on free GitHub-hosted runners (public repo:
+# 4 vCPU, 16 GB, 6 h per job). Clip generation is sharded across a matrix; the train
+# job merges the shards, fetches a byte-range slice of the ACAV100M negatives, and
+# uploads shodan.onnx as an artifact. Manual trigger only. Defaults = the real run;
+# a smoke run is shards=1 n_samples=40 acav_chunks=1 steps=200.
+name: wake-train
+on:
+  workflow_dispatch:
+    inputs:
+      shards:
+        description: "clip-generation shards to use (1-4)"
+        default: "4"
+      n_samples:
+        description: "total positive samples (split across shards)"
+        default: "20000"
+      acav_chunks:
+        description: "ACAV100M chunks of 50k examples to fetch (12 = 1.8 GB)"
+        default: "12"
+      steps:
+        description: "training steps"
+        default: "50000"
+
+env:
+  TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD: "1"
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  gen:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: true
+      matrix:
+        shard: [0, 1, 2, 3]
+    defaults: { run: { working-directory: wake-train } }
+    steps:
+      - uses: actions/checkout@v4
+        if: ${{ matrix.shard < fromJSON(inputs.shards) }}
+      - uses: actions/setup-python@v5
+        if: ${{ matrix.shard < fromJSON(inputs.shards) }}
+        with: { python-version: "3.11" }
+      - if: ${{ matrix.shard < fromJSON(inputs.shards) }}
+        run: bash setup.sh
+      - if: ${{ matrix.shard < fromJSON(inputs.shards) }}
+        run: python smoke_gen.py
+      - name: generate this shard's clips
+        if: ${{ matrix.shard < fromJSON(inputs.shards) }}
+        run: |
+          n=${{ inputs.shards }}; tot=${{ inputs.n_samples }}
+          sed -e "s/^n_samples: .*/n_samples: $((tot / n))/" \
+              -e "s/^n_samples_val: .*/n_samples_val: $((tot / n / 10))/" shodan.yml > shard.yml
+          grep -E "^n_samples" shard.yml
+          python openwakeword/openwakeword/train.py --training_config shard.yml --generate_clips 2>&1 | tail -40
+          for d in out/shodan/*/; do echo "$d $(ls "$d" | wc -l)"; done
+          tar cf clips.tar out
+      - uses: actions/upload-artifact@v4
+        if: ${{ matrix.shard < fromJSON(inputs.shards) }}
+        with:
+          name: clips-${{ matrix.shard }}
+          path: wake-train/clips.tar
+          retention-days: 3
+          compression-level: 0
+
+  train:
+    needs: gen
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    defaults: { run: { working-directory: wake-train } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: bash setup.sh
+      - uses: actions/download-artifact@v4
+        with: { pattern: "clips-*", path: wake-train/shards }
+      - name: merge shards
+        run: |
+          for t in shards/clips-*/clips.tar; do
+            s=$(basename "$(dirname "$t")" | sed 's/clips-/shard_/')
+            mkdir -p "shards/$s" && tar xf "$t" -C "shards/$s" && rm "$t"
+          done
+          python merge_shards.py shards out/shodan && rm -rf shards
+          df -h / | tail -1
+      - name: negatives, RIRs, background
+        run: |
+          mkdir -p data
+          curl -sSL -o data/validation_set_features.npy \
+            https://huggingface.co/datasets/davidscripka/openwakeword_features/resolve/main/validation_set_features.npy
+          python slice_acav.py data/acav_slice.npy ${{ inputs.acav_chunks }} 50000
+          python fetch_data.py
+          df -h / | tail -1
+      - name: augment (features)
+        run: python openwakeword/openwakeword/train.py --training_config shodan.yml --augment_clips 2>&1 | tail -30
+      - name: train
+        run: |
+          sed -e "s/^steps: .*/steps: ${{ inputs.steps }}/" shodan.yml > train.yml
+          python openwakeword/openwakeword/train.py --training_config train.yml --train_model 2>&1 | tee train.log | tail -60
+          find out -name "*.onnx" -exec ls -la {} \;
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: shodan-model
+          path: |
+            wake-train/out/**/*.onnx
+            wake-train/out/*.onnx
+            wake-train/train.log
+          retention-days: 30

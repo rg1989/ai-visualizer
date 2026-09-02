@@ -1,0 +1,42 @@
+# openWakeWord training config for the name "Shodan" (see the plan: phonemizers say
+# SHAH-dun for "shodan", so the training spellings are the ones that sound right).
+model_name: "shodan"
+target_phrase:
+  - "show dan"
+  - "show dahn"
+  - "showdan"
+custom_negative_phrases:
+  - "show them"
+  - "show then"
+  - "show that"
+  - "show down"
+  - "shut down"
+  - "show me"
+  - "so done"
+  - "jordan"
+  - "sean"
+n_samples: 20000
+n_samples_val: 2000
+tts_batch_size: 10
+augmentation_batch_size: 16
+piper_sample_generator_path: "./piper-sample-generator"
+output_dir: "./out"
+rir_paths:
+  - "./data/mit_rirs"
+background_paths:
+  - "./data/background"
+background_paths_duplication_rate:
+  - 1
+false_positive_validation_data_path: "./data/validation_set_features.npy"
+augmentation_rounds: 2
+feature_data_files:
+  "ACAV100M_sample": "./data/acav_slice.npy"
+batch_n_per_class:
+  "ACAV100M_sample": 1024
+  "adversarial_negative": 50
+  "positive": 50
+model_type: "dnn"
+layer_size: 32
+steps: 50000
+max_negative_weight: 1500
+target_false_positives_per_hour: 0.2

@@ -31,6 +31,8 @@
      AV.samples    Float32Array(64), 0..1 normalized waveform ring
      AV.alert      bool, optional attention signal
      AV.micLevel   0..1 your microphone (only if init({mic:true}))
+     AV.mic        {mode, hot, hush} the voice line's mic line from /state,
+                   or null (the overlay window hides while hush is set)
      AV.name       display name from config ("JARVIS" by default)
      AV.label      the dotted chip label ("J.A.R.V.I.S.")
      AV.badge      optional handle from config ("" by default)
@@ -462,6 +464,68 @@ const AV = (() => {
     _pickForce = true;
     updateModePicker(_lastMic);
   });
+  // The same summon for a host that has no Esc to press: the overlay's
+  // menu bar item calls this. Never the panic-key half -- that is Esc's.
+  A.settings = () => {
+    if (!FACE || _pickEl) return;
+    _pickForce = true;
+    updateModePicker(_lastMic);
+  };
+  // The talk key, on the PAGE (voice line config ptt_scope "face"): it
+  // fires only while this tab has keyboard focus, so Enter typed into any
+  // other window is that window's Enter. Bubble phase on purpose: the
+  // prompt box (prompt.js) and the settings screen own the keyboard while
+  // they are up, and both stop or claim the event before it gets here.
+  // Held = one POST plus a re-post every 250 ms (the voice line reads a
+  // quiet file as released, so a tab closed mid-hold cannot pin the mic
+  // open); released = one POST. The counter tells a tap from a repeat.
+  const _PTT_NAMES = {
+    enter: "Enter", return: "Enter", space: " ", tab: "Tab", home: "Home",
+    end: "End", esc: "Escape", escape: "Escape", page_up: "PageUp",
+    page_down: "PageDown", up: "ArrowUp", down: "ArrowDown",
+    left: "ArrowLeft", right: "ArrowRight", backspace: "Backspace",
+    delete: "Delete", right_option: "Alt", left_option: "Alt",
+    right_alt: "Alt", left_alt: "Alt", alt_r: "Alt", alt_l: "Alt",
+    right_ctrl: "Control", left_ctrl: "Control", ctrl_r: "Control",
+    ctrl_l: "Control", right_cmd: "Meta", left_cmd: "Meta", cmd_r: "Meta",
+    cmd_l: "Meta", right_shift: "Shift", left_shift: "Shift",
+    shift_r: "Shift", shift_l: "Shift",
+  };
+  function _isPttKey(e) {
+    // straight off the last poll: tick() only runs while the tab is
+    // painting, and a key must not depend on a frame having drawn
+    const name = String(raw.ptt_key || "").toLowerCase();
+    if (!name) return false;
+    const want = _PTT_NAMES[name] || (name.length === 1 ? name : name.toUpperCase());
+    return e.key.length === 1 ? e.key.toLowerCase() === want.toLowerCase()
+                              : e.key === want;
+  }
+  let _pttHeld = false, _pttBeat = null;
+  let _pttN = Math.floor(Math.random() * 1e6);   // fresh series per page load
+  function _pttPost(held) {
+    return _postJSON("ptt", { held, n: _pttN }).catch(() => {});
+  }
+  function _pttUp() {
+    if (!_pttHeld) return;
+    _pttHeld = false;
+    clearInterval(_pttBeat); _pttBeat = null;
+    _pttPost(false);
+  }
+  window.addEventListener("keydown", e => {
+    if (DEMO || !FACE || !_isPttKey(e)) return;
+    if (document.getElementById("av-mode-picker")) return;   // its keys
+    const t = e.target;
+    if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA")) return;
+    e.preventDefault();
+    if (e.repeat || _pttHeld) return;
+    _pttHeld = true; _pttN += 1;
+    _pttPost(true);
+    _pttBeat = setInterval(() => _pttPost(true), 250);
+  });
+  window.addEventListener("keyup", e => { if (_pttHeld && _isPttKey(e)) _pttUp(); });
+  window.addEventListener("blur", _pttUp);
+  window.addEventListener("pagehide", _pttUp);
+  document.addEventListener("visibilitychange", () => { if (document.hidden) _pttUp(); });
   function _postJSON(path, body) {
     return fetch(new URL(path, ROOT).href, {
       method: "POST",
@@ -1392,6 +1456,7 @@ const AV = (() => {
   function tick(dt) {
     if (DEMO) demoUpdate(dt);
     A.state = raw.state || "idle";
+    A.mic = raw.mic || null;   // {mode, hot, hush}: the overlay window hides on hush
     A.stage = raw.stage || "";
     A.alert = !!raw.alert;
     statusPaint();

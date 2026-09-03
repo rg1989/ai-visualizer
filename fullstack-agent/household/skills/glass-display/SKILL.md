@@ -26,18 +26,49 @@ Look (run BEFORE explicit placement and before describing the screen):
 
     ~/my-agent/ai-visualizer/bin/glass-state.sh
 
+## After every `html` show, look again
+
+An html card measures itself once it is on screen and glass-state.sh prints
+a `rendered:` line under it: the text it actually shows, its largest font
+size, `EMPTY` when nothing visible came out, `DARK TEXT` when the colour is
+unreadable on the glass. Run glass-state.sh a second after the show and read
+that line BEFORE telling the person it is up. "It should be visible now" is
+not a report; `rendered: "23:14:05"  largest text 64px` is. A native type
+(clock, timer, note, the components) needs no such check — prefer them.
+
+## Looking at it
+
+`glass-look.sh` (next to glass.sh) renders the glass off-screen to a PNG and
+prints the path; Read that file and you see exactly what a viewer sees --
+theme, sizes, overlap, the lot. Reach for it when the picture matters: a
+layout or style change you were not sure of, "that looks wrong", or before
+saying a visual change did what the person meant. Not after routine cards.
+`cam-look.sh` grabs one webcam frame the same way: use it whenever seeing
+helps (take a picture, identify or read something physical, check the room)
+and announce it as you do. `watch.sh start "what to watch for"` keeps the
+camera on and wakes you with frames only when the picture changes; add
+`--source screen` to watch the Mac's screen the same way. A watch switches
+itself off after 30 minutes or 40 events (`--for MINUTES` for longer) and says
+so in a `[watch]` line; `watch.sh stop` ends it early, `watch.sh status` says
+whether one runs. Say when a watch starts, when it will stop by itself, and
+when it stops. Never restart or extend one unless the person asks.
+
 ## Types and their fields
 
 | type | fields | notes |
 |---|---|---|
-| note | `title`, `body` (bold **x**, lists, `code`) | general card |
+| note | `title`, `body` (bold **x**, lists, `code`) | general card; sizes to its text (one short line = a big hero line in a 3x1 card) |
 | image | `src`, `caption?` | http(s) or repo-relative |
 | map | `q` (place) or `lat`+`lon`, `zoom?` | "where is X" |
 | calendar | `events` `[{date,time?,label}]`, `view?` | day plans; a day opens its own hours, so always send `time` |
 | timer | `until` (ISO) or `seconds`, `label?` | never dies early |
 | list | `items` `[{text,done?}]`, `title` | checklists |
+| image, live webcam | `src`: `cam.mjpg` | the glass server streams the camera itself while the card is up; dismiss it (or let it expire) and the camera light goes off |
 | iframe | `src`, `title` | YouTube: `youtube.com/embed/<id>`; many login-walled sites refuse framing — prefer a native type built from fetched data |
-| html | `html`, `title` | never hand-write one — see **glass-design** |
+| clock | `label?`, `format?` (`hms` default, `hm`) | the time of day, digits sized to the card — never an html card |
+| sysmon | `label?` | the machine at a glimpse: CPU and RAM bars, thermal, disk, load, battery, uptime, live. The overlay pins one at A1 by default; "hide the system monitor" = dismiss it — never an html card |
+| tasks | `label?` | your background work, live (bin/task.py shows it and it dismisses itself) — never show it by hand, never an html card |
+| html | `html`, `title` | last resort — see **glass-design**. The card is a sandboxed iframe that inherits NOTHING: set `color` yourself (default is black on a dark card); give it `html,body{height:100%;margin:0}` or `height:100%` boxes collapse to nothing; size type with `container-type:size` + `cqh`, never `vw`/`vmin` and never by measuring boxes in JS (a box measured before it has a height returns ~0 and the font goes to 0). Then LOOK — see below |
 
 ## The rules that make it feel right
 
@@ -58,9 +89,10 @@ Look (run BEFORE explicit placement and before describing the screen):
   unpinned lot.
 - **Update in place** for changing content (`{"a":"update","id":...,
   fields}`) — content only, no re-animation.
-- **Honesty**: every reply has `viewers`. Zero means no face is
-  watching — say the detail is ready on the glass rather than
-  describing pixels nobody sees. A refusal tells you exactly what's
+- **Honesty**: every reply has `viewers`, a number for you, never
+  for the person. Zero means no face is open — say the detail is ready
+  on the glass rather than describing pixels nobody sees. One or more:
+  never mention viewers or anyone watching; the person is looking. A refusal tells you exactly what's
   in the way (`map`, `free`, `dismiss_candidates`) — act on it.
 
 ## Prebuilt cards

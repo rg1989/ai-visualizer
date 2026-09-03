@@ -26,6 +26,9 @@
 #   ./start.sh          everything installed
 #   ./start.sh voice    the voice and the face (no hands)
 #   ./start.sh hands    the voice and the hands board (no face)
+#   JARVIS_FACE=overlay ./start.sh ...
+#                       the face over every window instead of a browser tab
+#                       (ai-visualizer/bin/overlay.sh; hold left Opt+Cmd to use it)
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 HOME_DIR="$(dirname "$HERE")"
@@ -43,9 +46,16 @@ trap cleanup EXIT INT TERM
 echo "fullstack-agent: starting from $HOME_DIR"
 
 if [ -d "$HOME_DIR/ai-visualizer" ] && [ "$MODE" != "hands" ]; then
-  (cd "$HOME_DIR/ai-visualizer" && exec python3 server.py) &
-  PIDS+=($!)
-  echo "  face:  starting (your browser opens on the visualizer)"
+  if [ "${JARVIS_FACE:-browser}" = overlay ]; then
+    (cd "$HOME_DIR/ai-visualizer" && exec python3 server.py --no-open) &
+    PIDS+=($!)
+    echo "  face:  starting as an overlay (hold left Opt+Cmd to use it, tap to show it)"
+    "$HOME_DIR/ai-visualizer/bin/overlay.sh" && PIDS+=($(pgrep -f "^[^ ]*/facewin .*--overlay"))
+  else
+    (cd "$HOME_DIR/ai-visualizer" && exec python3 server.py) &
+    PIDS+=($!)
+    echo "  face:  starting (your browser opens on the visualizer)"
+  fi
 fi
 
 if [ -d "$HOME_DIR/barehands" ] && [ "$MODE" != "voice" ]; then

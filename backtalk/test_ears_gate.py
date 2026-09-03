@@ -8,6 +8,43 @@ import math
 from backtalk import ears
 
 
+def test_vad_gate():
+    """The speech detector in front of whisper: noise scores near zero,
+    a spoken word scores near one. Real speech comes from the system voice
+    (macOS `say`); elsewhere only the noise half runs."""
+    import os
+    import shutil
+    import subprocess
+    import tempfile
+    import wave
+
+    import numpy as np
+    noise = (np.random.default_rng(0).standard_normal(16000 * 2)
+             * 1500).astype(np.int16)
+    p = ears._speech_prob(noise)
+    if p is None:
+        print("skip: silero VAD unavailable (openwakeword not installed)")
+        return
+    # measured: white/pink/fan/hum never above 0.38; the gate sits at 0.5
+    assert p < 0.4, f"white noise scored {p:.2f} as speech"
+    assert ears._speech_prob(noise[:100]) == 0.0      # shorter than a frame
+    if not (shutil.which("say") and shutil.which("afconvert")):
+        print(f"ok: noise scores {p:.2f} (no system voice here to test speech)")
+        return
+    d = tempfile.mkdtemp(prefix="backtalk-test-")
+    subprocess.run(["say", "-v", "Samantha", "-o", f"{d}/w.aiff", "Thank you."],
+                   check=True)
+    subprocess.run(["afconvert", "-f", "WAVE", "-d", "LEI16@16000", "-c", "1",
+                    f"{d}/w.aiff", f"{d}/w.wav"], check=True)
+    with wave.open(f"{d}/w.wav") as w:
+        spoken = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16)
+    # padded the way the capture pads: 360 ms pre-roll, 1.1 s endpoint tail
+    padded = np.concatenate([noise[:5760] // 50, spoken, noise[:17600] // 50])
+    q = ears._speech_prob(padded)
+    assert q > 0.8, f"a spoken 'Thank you.' scored only {q:.2f}"
+    print(f"ok: VAD noise {p:.2f} vs spoken word {q:.2f}")
+
+
 def test_gates():
     ears.set_prompt("SHODAN")
     # a GLOSSARY line, never a sentence and never the bare name: nobody
@@ -179,6 +216,7 @@ def test_hint_is_withheld_on_non_speech():
 
 if __name__ == "__main__":
     test_gates()
+    test_vad_gate()
     test_pronunciation()
     test_unsummoned()
     test_hint_echo_is_cut_even_with_litter_stapled_to_it()

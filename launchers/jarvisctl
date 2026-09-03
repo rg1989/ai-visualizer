@@ -2,6 +2,7 @@
 # "AI Visualizer.app"'s process owner and stop button.
 #
 #   jarvisctl run [launcher]   become the agent (exec'd inside iTerm by the app)
+#   jarvisctl run overlay      the same, with the face as an overlay (the app asks)
 #   jarvisctl status           the agent's pid, or 0
 #   jarvisctl stop             take the whole tree down
 #   jarvisctl build            rebuild the .app from the .applescript
@@ -13,6 +14,7 @@ PIDFILE="$HOME/my-agent/.jarvis.pid"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 APP="$HOME/Applications/AI Visualizer.app"
 LAUNCHER="${2:-$HOME/my-agent/launchers/Talk to Jarvis.command}"
+[ "$2" = overlay ] && LAUNCHER="$HOME/my-agent/launchers/Talk to Jarvis (Overlay).command"
 
 alive() {
   local p; p=$(cat "$PIDFILE" 2>/dev/null)

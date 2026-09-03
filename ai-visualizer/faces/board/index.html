@@ -79,7 +79,13 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 
   #vig{position:fixed;inset:0;pointer-events:none;z-index:8;
        background:radial-gradient(ellipse at 50% 50%,transparent 52%,rgba(0,0,0,.6) 100%)}
+
+  /* ---------- overlay (?overlay=1, bin/overlay.sh) ---------- */
+  /* the face and the glass over the desktop: no substrate, no chrome */
+  html.overlay,html.overlay body{background:transparent;cursor:default}
+  html.overlay .hud,html.overlay #vig{display:none}
 </style>
+<script>if(/[?&]overlay=1(&|$)/.test(location.search))document.documentElement.classList.add("overlay")</script>
 </head>
 <body>
 <canvas id="stage"></canvas>
@@ -134,6 +140,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 
 const Q = new URLSearchParams(location.search);
 const SHOT = Q.get("shot");
+const OVERLAY = Q.get("overlay")==="1";   // over the desktop: no board, no post pass
 let seed = parseInt(Q.get("seed")||"7",10);
 function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296}}
 const rnd = mulberry32(seed);
@@ -425,7 +432,7 @@ function buildBoard(){
   glowSprites.green=glowSprites[GREEN];
   glowSprites.amber=glowSprites[AMBER];
   glowSprites.white=makeGlow("rgb(220,255,235)",64);
-  renderBG();
+  if(!OVERLAY)renderBG();
 }
 
 /* ---------------- the board, drawn as vectors ----------------
@@ -938,11 +945,11 @@ function frame(dt){
     ctx.translate(W/2,H/2);ctx.scale(cam.z,cam.z);ctx.translate(-cam.x,-cam.y);
     const vw=W/cam.z/2+60, vh=H/cam.z/2+60;
     drawWorld(ctx,[cam.x-vw,cam.y-vh,cam.x+vw,cam.y+vh],cam.z);
-  }else ctx.drawImage(bgLayer,0,0);
+  }else if(!OVERLAY)ctx.drawImage(bgLayer,0,0);
   ctx.globalCompositeOperation="lighter";
 
   /* prismatic wash: the whole board shifts color while the agent talks */
-  if(talkS>.02){
+  if(talkS>.02&&!OVERLAY){
     const wa=(.05+.09*lvlS)*talkS;
     let g1=ctx.createRadialGradient(W*.30,H*.34,0,W*.30,H*.34,W*.42);
     g1.addColorStop(0,`rgba(53,224,255,${wa})`);g1.addColorStop(1,"rgba(0,0,0,0)");
@@ -1055,10 +1062,14 @@ function frame(dt){
     // a portrait theme drops the circular back glow too — no discs or
     // rings behind her, she carries the state light herself
     if(!faceIm){
+    // the wide back glow floods a bare desktop (it reads as ambient light
+    // only against the board), so the overlay keeps just the tight one below
+    if(!OVERLAY){
     ctx.globalAlpha=cg*(1-.85*listenS);
     ctx.drawImage(glowSprites.green,ccx-s/2,ccy-s/2,s,s);
     if(listenS>.02){ctx.globalAlpha=cg*.9*listenS;
       ctx.drawImage(cool,ccx-s/2,ccy-s/2,s,s);}
+    }
     const cg2=Math.min(1,(.2+.42*E)+.14*breathe+.35*talk+.3*chip.glowIn+.4*pulse);
     const s2=w*(.85+.3*E+.3*talk+.15*chip.glowIn+.2*pulse);
     ctx.globalAlpha=cg2*(1-.85*listenS);
@@ -1207,6 +1218,7 @@ function frame(dt){
   }
 
   ctx.restore();   // camera off — everything below is screen-space post
+  if(OVERLAY)return;   // sheen, sweep, grain, crosshair: the lens is the desktop now
 
   /* roaming specular sheen — the light breathing across the lens */
   {
@@ -1248,6 +1260,7 @@ function resize(){
   W=cv.width=innerWidth*DPR;H=cv.height=innerHeight*DPR;
   cv.style.width=innerWidth+"px";cv.style.height=innerHeight+"px";
   buildBoard();
+  if(OVERLAY){traces=[];comps=[];}   // no traces: no pulses, no flashes, no cine
   cam={x:W/2,y:H/2,z:1};
   // shot harness: the late headless resize must RESTART the cine, not kill it
   if(SHOT&&Q.get("cine")==="1")startCine();

@@ -856,6 +856,10 @@
     } catch (e) {
       on = false;
       if (port) { port.remove(); port = null; }
+      // release the camera too: a failed start used to leave the stream
+      // running with no preview, so the light stayed on and every retry
+      // opened another one
+      if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
       video = null;
       console.warn("hands: could not start.", e);
       toast("hands: no camera — " + (e && e.name || "failed"), 3500);

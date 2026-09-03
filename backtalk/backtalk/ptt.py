@@ -48,6 +48,8 @@ import time
 
 from pynput import keyboard
 
+from backtalk import signals
+
 
 # Keys you cannot avoid pressing while using the computer. The single
 # printable characters are the worst of the lot and are NOT listed here --
@@ -165,3 +167,38 @@ class PTTListener:
     def is_held(self) -> bool:
         self._settle()
         return self._held
+
+
+class FacePTT:
+    """The talk key as the FACE PAGE sees it (config ptt_scope "face").
+
+    No global hook at all. core.js binds the key on the face page and
+    POSTs held/released (plus a press counter) to the visualizer, which
+    drops .voice_ptt beside the bus; this reads it. So the key counts
+    only while that browser tab has keyboard focus: Enter typed into any
+    other window is that window's Enter. Field-caught with the global
+    listener and ptt_key "enter": every message the owner typed into a
+    chat window cut the reply in progress and dropped the face to idle
+    while the brain kept working unseen.
+
+    Same wait_press()/is_held() as PTTListener, so main.py cannot tell
+    the two apart. The page re-posts every 250 ms while held; a file
+    older than signals.PTT_STALE_S reads as released, so a tab closed
+    mid-hold cannot pin the mic open. No Input Monitoring needed."""
+    POLL = 0.02
+
+    def __init__(self):
+        # Whatever press the file holds from before this run is history.
+        self._seen = signals.face_ptt()[1]
+
+    def wait_press(self):
+        """Block until the page reports a NEW press (counter moved)."""
+        while True:
+            held, n = signals.face_ptt()
+            if held and n != self._seen:
+                self._seen = n
+                return
+            time.sleep(self.POLL)
+
+    def is_held(self) -> bool:
+        return signals.face_ptt()[0]

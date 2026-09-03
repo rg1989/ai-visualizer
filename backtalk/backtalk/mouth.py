@@ -53,6 +53,7 @@ import sounddevice as sd
 
 from backtalk import signals
 from backtalk.config import CFG
+from backtalk.ears import PA_LOCK
 from backtalk.vlog import log
 
 KOKORO_RATE = 24000
@@ -538,8 +539,13 @@ class Mouth:
             self._speaking.set()
             self.ducker.speech_start()
             signals.static_stop()     # thinking sound dies when speech starts
-            signals.set_state("speaking")
-            signals.set_stage("")
+            # "speaking" is raised at AUDIO START, in _play_stream. A chunk
+            # that is not prefetched has its whole synthesis ahead of it
+            # (~0.7 s warm, 3 s+ on the first cold load) and the face used
+            # to animate a voice that was not there yet. While that wait is
+            # real, say what it is; audio start clears it.
+            if rate is None:
+                signals.set_stage("generating speech")
             # THE PERIOD FIX: while this chunk plays, render the next
             # queued one in parallel. Serially, every sentence boundary
             # cost the entire synthesis of the following sentence (the
@@ -637,14 +643,19 @@ class Mouth:
             # rebuilds it, which is what the rest of this method does.
             try:
                 if not self._out.active:
-                    self._out.start()
+                    with PA_LOCK:
+                        self._out.start()
                 return self._out
             except Exception:
                 log("[mouth] the output stream went away, reopening")
         self._drop_out()
-        self._out = sd.OutputStream(samplerate=rate, channels=1, dtype="int16")
-        self._out_rate = rate
-        self._out.start()
+        # Under the ears' device lock: an output open racing a mic stop is
+        # the PortAudio collision that wedged the mic (ears.PA_LOCK).
+        with PA_LOCK:
+            self._out = sd.OutputStream(samplerate=rate, channels=1,
+                                        dtype="int16")
+            self._out_rate = rate
+            self._out.start()
         return self._out
 
     def _cut(self):
@@ -666,7 +677,8 @@ class Mouth:
         unplugged, audio mixer restarted)."""
         if self._out is not None:
             try:
-                self._out.close(ignore_errors=True)
+                with PA_LOCK:
+                    self._out.close(ignore_errors=True)
             except Exception:
                 pass
         self._out = None
@@ -722,6 +734,7 @@ class Mouth:
             # silence here is indistinguishable from "it printed the reply
             # but never read it aloud".
             log(f"[mouth] no audio rendered, chunk not spoken: {sentence[:80]!r}")
+            signals.set_stage("")     # never leave "generating speech" up
             return
         head[0] = self._trim_lead(head[0], rate)
         if pre:
@@ -731,6 +744,8 @@ class Mouth:
             # AUDIO STARTS HERE: the head buffer is full and the first write
             # is next. Publishing now is what puts a screen cue on the spoken
             # word rather than seconds ahead of it.
+            signals.set_state("speaking")
+            signals.set_stage("")
             if directions:
                 signals.direction(directions)
             if chat:

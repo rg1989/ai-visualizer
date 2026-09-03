@@ -15,6 +15,12 @@ dependencies = [
     # platform keeps faster-whisper, which already uses CUDA.
     "mlx-whisper>=0.4.0 ; sys_platform == 'darwin' and platform_machine == 'arm64'",
     "numpy>=1.26.0",
+    # Wake-word detection on the audio itself (openWakeWord's stock
+    # hey_jarvis model, 1.2 MB, ~3% of one core). Without it, wake mode
+    # runs the whole whisper model on every noise the VAD opens on, just
+    # to see whether the transcript starts with the name -- measured at
+    # 84% of all transcriptions in a 43-hour log. See wakeword_audio.py.
+    "openwakeword>=0.6.0",
     "pynput>=1.8.0",
     # Speaker identification (voice_id): ECAPA voiceprints, local.
     # Torch is already here under kokoro, so this is a light add.

@@ -205,8 +205,13 @@
     if (pre !== null) out += "<pre>" + esc(pre.join("\n")) + "</pre>";
     return out;
   }
-  function renderNote(body, item) {
-    body.innerHTML = mdSubset(item.body || "");
+  function renderNote(body, item, rec) {
+    const src = String(item.body || "");
+    body.innerHTML = mdSubset(src);
+    // One short plain line is a HERO line: centered, sized to the card.
+    const t = src.trim();
+    const short = t.length <= 48 && !/\n/.test(t) && !/(\*\*|`|^#|^[-*] |^\d+\. )/m.test(t);
+    if (rec && rec.el) rec.el.classList.toggle("glass-short", short);
   }
 
   function renderImage(body, item) {
@@ -473,6 +478,125 @@
     rec.timerEl.classList.toggle("glass-timer-done", left <= 0);
   }
 
+  // clock: the time of day, the timer's shape. Repainted by sweep() at the
+  // tick cadence; the digits only touch the DOM when the second changes.
+  function renderClock(body, item, rec) {
+    const big = el("div", "glass-clock-big");
+    body.appendChild(big);
+    if (item.label) body.appendChild(el("div", "glass-clock-label", item.label));
+    rec.clockEl = big;
+    rec.clockFmt = item.format === "hm" ? "hm" : "hms";
+    paintClock(rec);
+  }
+  function paintClock(rec) {
+    if (!rec.clockEl) return;
+    const d = new Date(), p = n => String(n).padStart(2, "0");
+    const txt = p(d.getHours()) + ":" + p(d.getMinutes()) +
+      (rec.clockFmt === "hm" ? "" : ":" + p(d.getSeconds()));
+    if (rec.clockEl.textContent !== txt) rec.clockEl.textContent = txt;
+  }
+  // sysmon: the machine at a glimpse. The card polls /sys itself every 2 s
+  // (the clock ticks itself the same way), so the glass payload never moves
+  // for a number and nothing wakes for one. Bars for the two things that
+  // fill up; the rest is a value per row. A row the machine cannot answer
+  // (no battery) leaves rather than showing a dash forever.
+  function renderSysmon(body, item, rec) {
+    const rows = {};
+    const row = (k, name, withBar) => {
+      const r = el("div", "glass-sys-row" + (withBar ? " glass-sys-bar" : ""));
+      r.appendChild(el("span", "glass-sys-k", name));
+      let fill = null;
+      if (withBar) {
+        const track = el("div", "glass-sys-track");
+        fill = el("div", "glass-sys-fill");
+        track.appendChild(fill);
+        r.appendChild(track);
+      }
+      const v = el("span", "glass-sys-v", "—");
+      r.appendChild(v);
+      body.appendChild(r);
+      rows[k] = { el: r, fill, v };
+    };
+    row("cpu", "CPU", true); row("ram", "RAM", true);
+    row("thermal", "THERMAL"); row("disk", "DISK"); row("load", "LOAD");
+    row("batt", "BATT"); row("up", "UP");
+    if (item.label) body.appendChild(el("div", "glass-sys-label", item.label));
+    const gb = n => (n / 1073741824).toFixed(n >= 107374182400 ? 0 : 1);
+    const up = s => s >= 86400 ? Math.floor(s / 86400) + "d " + Math.floor(s % 86400 / 3600) + "h"
+      : s >= 3600 ? Math.floor(s / 3600) + "h " + Math.floor(s % 3600 / 60) + "m"
+      : Math.floor(s / 60) + "m";
+    const set = (k, txt, pct) => {
+      const r = rows[k];
+      if (!r) return;
+      if (txt == null) { r.el.remove(); delete rows[k]; return; }
+      if (r.v.textContent !== txt) r.v.textContent = txt;
+      if (r.fill && pct != null) {
+        r.fill.style.width = Math.max(0, Math.min(100, pct)) + "%";
+        r.fill.classList.toggle("hot", pct >= 85);
+      }
+    };
+    const paint = m => {
+      if (m.cpu != null) set("cpu", Math.round(m.cpu) + "%", m.cpu);
+      if (m.ram != null) set("ram", gb(m.ram_used) + "/" + gb(m.ram_total).replace(/\.0$/, "") + " GB", m.ram);
+      set("thermal", m.temp != null ? Math.round(m.temp) + "°C"
+        : ["NOMINAL", "FAIR", "SERIOUS", "CRITICAL"][m.thermal] || null);
+      if (m.disk_free != null) set("disk", gb(m.disk_free) + " GB free");
+      set("load", m.load != null ? m.load.toFixed(2) + " / " + m.cpus : null);
+      set("batt", m.batt != null ? Math.round(m.batt) + "%" : null);
+      set("up", m.up != null ? up(m.up) : null);
+    };
+    const tick = () => fetch(new URL("sys", ROOT), { cache: "no-store" })
+      .then(r => r.json()).then(paint).catch(() => {});
+    tick();
+    rec.sysTimer = setInterval(tick, 2000);
+  }
+  // tasks: the assistant's background work, live (bin/task.py writes the
+  // records, /tasks serves them). Polled every 2 s like sysmon. A running
+  // row spins and counts, a finished one keeps its verdict for a moment,
+  // and when nothing is left for a while the card dismisses itself the
+  // way its × would -- so a stale pinned card never outlives the work.
+  function renderTasks(body, item, rec) {
+    const list = el("div", "glass-task-list");
+    body.appendChild(list);
+    if (item.label) body.appendChild(el("div", "glass-sys-label", item.label));
+    const MARK = { running: "", done: "✓", failed: "✗", stopped: "■" };
+    const mmss = s => {
+      s = Math.max(0, Math.floor(s));
+      return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
+    };
+    let emptySince = null;
+    const paint = d => {
+      const now = Date.now() / 1000;
+      const tasks = (d.tasks || []).filter(t =>
+        t.status === "running" || now - (t.ended || now) < 15);
+      list.textContent = "";
+      const MAX = 6;                       // the card hugs its rows; past six, a count
+      for (const t of tasks.slice(0, MAX)) {
+        const row = el("div", "glass-task " + t.status);
+        row.appendChild(el("span", "glass-task-mark", MARK[t.status] || ""));
+        row.appendChild(el("span", "glass-task-label", t.label));
+        row.appendChild(el("span", "glass-task-time", mmss((t.ended || now) - t.started)));
+        list.appendChild(row);
+      }
+      if (tasks.length > MAX)
+        list.appendChild(el("div", "glass-task-none", "+" + (tasks.length - MAX) + " more"));
+      if (tasks.length) { emptySince = null; return; }
+      list.appendChild(el("div", "glass-task-none", "nothing running"));
+      emptySince = emptySince || now;
+      if (now - emptySince > 10) dismissCard(item.id);
+    };
+    const tick = () => fetch(new URL("tasks", ROOT), { cache: "no-store" })
+      .then(r => r.json()).then(paint).catch(() => {});
+    tick();
+    rec.sysTimer = setInterval(tick, 2000);
+  }
+  // The same `dismiss` the × posts, for a card that knows it is done.
+  function dismissCard(id) {
+    fetch(new URL("cmd", ROOT).href, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ a: "dismiss", id }),
+    }).catch(() => {});
+  }
   function renderList(body, item) {
     for (const it of Array.isArray(item.items) ? item.items : []) {
       const row = el("div", "glass-li" + (it && it.done ? " done" : ""));
@@ -515,12 +639,90 @@
   // frame enters the DOM. srcdoc without allow-same-origin gets an opaque
   // origin: scripts run, but the fragment cannot reach window.parent,
   // cannot shed its own sandbox, and cannot read any same-origin response.
-  function renderHtml(body, item) {
+  //
+  // THE PROBE. Nobody outside the frame can see what it rendered -- not this
+  // page (opaque origin), not the server, and not the agent that wrote the
+  // fragment, which is how a 0.9px clock was announced as "filling the
+  // frame". So the frame measures itself: after load and once a second it
+  // posts its visible text, the largest font size among leaf text nodes,
+  // whether anything is legible at all, and whether that text is dark on
+  // the dark glass. The message is data; the parent matches it to a card by
+  // contentWindow identity and forwards it as the "report" verb, and
+  // glass-state.sh prints it as the card's `rendered:` line.
+  const PROBE = "<script>(function(){" +
+    "function lum(c){var m=/rgba?\\((\\d+),\\s*(\\d+),\\s*(\\d+)/.exec(c||'');" +
+    "if(!m)return 1;return (0.2126*m[1]+0.7152*m[2]+0.0722*m[3])/255;}" +
+    "function m(){var b=document.body;if(!b)return;" +
+    // No layout (hidden tab, curtained face, 0x0 frame): say exactly that
+    // and nothing else. Measuring an unlaid frame returns body defaults --
+    // 16px, black, visible -- a confident lie about a card nobody can see.
+    "if(!innerWidth||!innerHeight){try{parent.postMessage({glassProbe:1,laidOut:false," +
+    "w:innerWidth,h:innerHeight},'*');}catch(x){}return;}" +
+    "var t=(b.innerText||'').replace(/\\s+/g,' ').trim().slice(0,160);" +
+    // Every text leaf is MEASURED whatever its size -- a 0.9px clock is a
+    // leaf too, and skipping it as unmeasurable is how it once came back
+    // as "16px, visible". Only the visible verdict needs a real box.
+    "var best=0,vis=false,col='',leaf=false,top=1e9,bot=-1e9;var els=b.getElementsByTagName('*');" +
+    "for(var i=0;i<els.length;i++){var e=els[i],tx=e.textContent;" +
+    "if(!tx||!tx.trim()||e.children.length||/^(SCRIPT|STYLE|NOSCRIPT|TEMPLATE|TITLE)$/.test(e.tagName))continue;leaf=true;" +
+    "var cs=getComputedStyle(e),r=e.getBoundingClientRect();" +
+    "var fs=parseFloat(cs.fontSize)||0;if(fs>best){best=fs;col=cs.color;}" +
+    "var shown=r.width>=1&&r.height>=1&&cs.visibility!=='hidden'&&cs.display!=='none'" +
+    "&&parseFloat(cs.opacity)!==0;if(shown&&fs>=8){vis=true;if(r.top<top)top=r.top;if(r.bottom>bot)bot=r.bottom;}}" +
+    "if(t.length&&!leaf){var bs=getComputedStyle(b);best=parseFloat(bs.fontSize)||16;" +
+    "col=bs.color;vis=best>=8;}" +
+    "try{parent.postMessage({glassProbe:1,laidOut:true,text:t,fontMax:Math.round(best*10)/10," +
+    "visible:vis&&t.length>0,dark:vis&&lum(col)<0.25,w:innerWidth,h:innerHeight," +
+    "bodyH:b.scrollHeight,textH:bot>top?Math.round(bot-top):0},'*');}catch(x){}}" +
+    "addEventListener('load',m);setInterval(m,1000);})();<\/script>";
+  // THE HOUSE SHELL. The frame is an opaque origin and inherits nothing from
+  // the page: black default text, an 8px body margin, quirks mode, no height
+  // on html/body (so a child's height:100% collapses). Every hand-written
+  // card tonight hit one of those. The shell hands the fragment the LIVE
+  // theme tokens (read from this page, so a theme switch carries into new
+  // cards), a reset, a full-height standards-mode body in the body font and
+  // text colour, and the probe. A fragment that is already a whole document
+  // (<html ...>) is left as it is, probe prepended.
+  const SHELL_TOKENS = ["--glass-bg", "--glass-line", "--glass-line-dim",
+    "--glass-text", "--glass-text-dim", "--glass-accent", "--glass-radius",
+    "--glass-radius-sm", "--glass-title-font", "--glass-body-font"];
+  function shell(html) {
+    if (/<html[\s>]/i.test(html)) return PROBE + html;
+    const cs = getComputedStyle(document.documentElement);
+    const vars = SHELL_TOKENS.map(n => {
+      const v = cs.getPropertyValue(n).trim();
+      return v ? n + ":" + v + ";" : "";
+    }).join("");
+    return "<!doctype html><html><head><meta charset=\"utf-8\"><style>" +
+      ":root{" + vars + "}" +
+      "*,*::before,*::after{box-sizing:border-box}" +
+      "html,body{height:100%;margin:0;padding:0;background:transparent}" +
+      "body{color:var(--glass-text);font-family:var(--glass-body-font);" +
+      "font-size:14px;line-height:1.3;overflow:hidden}" +
+      "</style></head><body>" + PROBE + html + "</body></html>";
+  }
+  function renderHtml(body, item, rec) {
     const f = document.createElement("iframe");
     f.setAttribute("sandbox", "allow-scripts");
     f.title = String(item.title || item.id);
-    f.srcdoc = String(item.html || "");
+    f.srcdoc = shell(String(item.html || ""));
     body.appendChild(f);
+    if (rec) rec.frameEl = f;
+  }
+  function reportRender(id, rec, d) {
+    const r = { laidOut: d.laidOut !== false, text: String(d.text || "").slice(0, 160),
+      fontMax: +d.fontMax || 0, visible: !!d.visible, dark: !!d.dark,
+      w: d.w | 0, h: d.h | 0, bodyH: d.bodyH | 0, textH: d.textH | 0 };
+    const key = JSON.stringify(r), now = performance.now();
+    // Only a changed measurement travels, or a heartbeat every 10 s.
+    if (key === rec.reportKey && now - (rec.reportT || 0) < 10000) return;
+    rec.reportKey = key; rec.reportT = now; rec.report = r;
+    if (GLASSDEMO) return;
+    fetch(new URL("cmd", ROOT).href, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ a: "report", id, render: r }),
+    }).catch(() => { /* offline: the next measurement will try again */ });
   }
 
   /* ------------------------------- the player ----------------------------- */
@@ -847,6 +1049,9 @@
     map: renderMap,
     calendar: renderCalendar,
     timer: renderTimer,
+    clock: renderClock,
+    sysmon: renderSysmon,
+    tasks: renderTasks,
     list: renderList,
     iframe: renderIframe,
     html: renderHtml,
@@ -868,6 +1073,9 @@
     rec.titleEl.textContent = titleFor(item);
     rec.hostEl.textContent = "";
     rec.timerEl = null;
+    rec.clockEl = null;
+    clearInterval(rec.sysTimer); rec.sysTimer = null;
+    rec.frameEl = null;
     rec.body.textContent = "";
     (REGISTRY[item.type] || renderUnknown)(rec.body, item, rec);
   }
@@ -908,6 +1116,7 @@
       body: el("div", "glass-body"),
       titleEl: el("span", "glass-title"),
       hostEl: el("span", "glass-host"),
+      ttlEl: el("span", "glass-ttl"),     // m:ss until the card fades; blank when pinned
       timerEl: null,
       rev: item.rev,
       cell: item.cell,
@@ -918,8 +1127,11 @@
       item: null,          // both set by renderInto below
       offline: false,
     };
-    head.append(rec.titleEl, rec.hostEl, el("span", "glass-id", item.id),
-                closeBtn(item));
+    // The id ("note-7") is how an agent addresses the card; on screen it
+    // read as noise, so it lives in the title's tooltip and its slot shows
+    // the one number a person wants: how long until the card fades.
+    rec.titleEl.title = item.id;
+    head.append(rec.titleEl, rec.hostEl, rec.ttlEl, closeBtn(item));
     card.append(head, rec.body);
     card.dataset.id = item.id;      // hands.js reads this to post /cmd
     placeEl(card, item.cell, item.span);
@@ -935,6 +1147,7 @@
 
   function removeCard(id, rec) {
     cards.delete(id);
+    clearInterval(rec.sysTimer);
     const card = rec.el;
     if (RM.matches) { card.remove(); return; }
     card.classList.remove("glass-enter", "glass-expiring");
@@ -994,6 +1207,12 @@
   function sweep(now) {
     for (const [id, rec] of [...cards]) {
       if (rec.timerEl) paintTimer(rec, now);
+      if (rec.clockEl) paintClock(rec);
+      if (rec.ttlEl) {
+        const txt = rec.deadline == null ? ""
+          : mmss(Math.max(0, rec.deadline - now) / 1000);
+        if (rec.ttlEl.textContent !== txt) rec.ttlEl.textContent = txt;
+      }
       if (rec.deadline == null) {
         // pinned mid-pulse: the deadline vanished (pin bumps glass.rev but
         // not item.rev, so no re-render), and nothing else ever toggles the
@@ -1121,6 +1340,15 @@
       for (const rec of cards.values())
         if (rec.yt && rec.yt.frame.contentWindow === e.source)
           return rec.yt.onMsg(e.data);
+    }));
+    // The html probes report here. Matched by contentWindow identity, so a
+    // message from anything but a live html card's own frame is ignored.
+    addEventListener("message", guard(e => {
+      const d = e.data;
+      if (!d || d.glassProbe !== 1) return;
+      for (const [id, rec] of cards)
+        if (rec.frameEl && rec.frameEl.contentWindow === e.source)
+          return reportRender(id, rec, d);
     }));
     if (GLASSDEMO) stageFixtures();
     // ~8 Hz, matching the poll cadence — the diff only touches the DOM

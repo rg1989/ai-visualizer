@@ -19,3 +19,8 @@ glass-state.json
 # ignore line is the whole switch. Nothing else has to know it exists:
 #   themes/mybrand/
 #   faces/mybrand/
+bin/facewin
+# bin/task.py's records and logs, and the typed-turn file it posts through
+.tasks/
+.voice_typed
+.voice_typed.tmp

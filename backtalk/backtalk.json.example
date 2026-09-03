@@ -2,6 +2,7 @@
   "agent_dir": "~",
   "name": "Assistant",
   "ptt_key": "home",
+  "ptt_scope": "global",
   "voice": "bm_lewis",
   "stt_model": "small.en"
 }

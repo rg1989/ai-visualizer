@@ -25,10 +25,12 @@ an utterance opens after ~120ms of sustained speech, closes after
 `silence_ms` of trailing quiet. A `gate` callable can suppress
 listening (so the open mic ignores the speakers unless barge-in is on).
 """
+import contextlib
 import platform
 import re
 import sys
 import threading
+from pathlib import Path
 
 import numpy as np
 import sounddevice as sd
@@ -62,6 +64,25 @@ _model_lock = threading.Lock()
 _backend = None          # "mlx" once the GPU path loads, else "faster-whisper"
 
 
+def _stub_numba():
+    """mlx_whisper.timing does `import numba` and decorates two functions
+    with @numba.jit(nopython=True) at import time, so merely importing
+    mlx_whisper drags in numba+llvmlite: 17 MB resident and 1.2 s of
+    startup, measured -- all for add_word_timestamps(), which transcribe()
+    only calls with word_timestamps=True, and this file never sets. A stub
+    whose jit() hands the function back untouched satisfies the decorator;
+    the decorated bodies never run here.
+    ponytail: if anything in this process ever needs real numba, delete
+    this and pay the 17 MB."""
+    if "numba" in sys.modules:
+        return
+    import types
+    stub = types.ModuleType("numba")
+    stub.jit = stub.njit = lambda *a, **k: (a[0] if a and callable(a[0])
+                                            else (lambda f: f))
+    sys.modules["numba"] = stub
+
+
 def _apple_gpu_available() -> bool:
     """Apple Silicon only. CTranslate2, the runtime under faster-whisper,
     has no Metal backend, so on every Mac it transcribes on the CPU while
@@ -77,6 +98,7 @@ def _apple_gpu_available() -> bool:
     faster-whisper, which already uses CUDA wherever it exists."""
     if sys.platform != "darwin" or platform.machine() != "arm64":
         return False
+    _stub_numba()
     try:
         import mlx_whisper                       # noqa: F401
     except ImportError:
@@ -84,9 +106,60 @@ def _apple_gpu_available() -> bool:
     return True
 
 
-def _mlx_repo(model_name: str) -> str:
-    """A faster-whisper model name -> its MLX conversion on the Hub."""
-    return f"mlx-community/whisper-{model_name}-mlx"
+def _mlx_repo(model_name: str, quant: str = "") -> str:
+    """A faster-whisper model name -> its MLX conversion on the Hub.
+
+    `quant` picks a quantized conversion of the SAME model: "8bit" halves
+    the resident weights of small.en from 462 MB to 289 MB. Measured on
+    eight spoken clips at four noise levels (clean, 20/10/5/0 dB SNR),
+    8-bit returned transcripts CHARACTER-IDENTICAL to fp16 at every level,
+    for +5 ms. 4-bit is 195 MB but its output DRIFTS from fp16 (better at
+    5 dB, worse at 0 dB) -- same weights quantized harder is not the same
+    model, so it is not offered as a default.
+    """
+    base = _MLX_NAMED.get(model_name,
+                          f"mlx-community/whisper-{model_name}-mlx")
+    return base + (f"-{quant}" if quant else "")
+
+
+# The Hub's newer uploads dropped the "-mlx" suffix; the quant suffix
+# still applies ("...-turbo-8bit").
+_MLX_NAMED = {"large-v3-turbo": "mlx-community/whisper-large-v3-turbo"}
+
+
+def _bridge_weights(snapshot) -> bool:
+    """Make a newer Hub conversion loadable by this mlx_whisper.
+
+    mlx_whisper 0.4.3 (the newest release) opens weights.safetensors,
+    then weights.npz. The Hub's 2025+ conversions -- large-v3-turbo-8bit
+    among them -- ship model.safetensors, a name only an unreleased
+    upstream build reads. One relative symlink beside the download closes
+    the gap. True when a link was made; the old layouts are left alone.
+    Never raises.
+    ponytail: delete when mlx_whisper opens model.safetensors itself.
+    """
+    try:
+        d = Path(snapshot)
+        if ((d / "model.safetensors").exists()
+                and not (d / "weights.safetensors").exists()
+                and not (d / "weights.npz").exists()):
+            (d / "weights.safetensors").symlink_to("model.safetensors")
+            return True
+    except OSError:
+        pass
+    return False
+
+
+def _mlx_ready(repo: str) -> str:
+    """The repo, fetched and bridged. Fetching here is exactly what
+    transcribe() does on its first call; a repo that is not on the Hub
+    still raises from transcribe(), where warm()'s fallback catches it."""
+    try:
+        from huggingface_hub import snapshot_download
+        _bridge_weights(snapshot_download(repo))
+    except Exception:
+        pass
+    return repo
 
 
 _mic_checked = False
@@ -136,8 +209,41 @@ def _mic_index():
     return None
 
 
+# ONE lock for every PortAudio open/start/stop/close in this process.
+# Field-caught 2026-09-02 (macOS 26, CoreAudio 5): the talk key aborts the
+# wake capture -- Pa_StopStream on one thread -- while record_held opens
+# its own stream on another. CoreAudio's IO thread holds the HAL device
+# mutex while it waits for the AudioUnit mutex the opener holds: three
+# threads, one cycle, the mic gone for the life of the process and the
+# face parked on "listening" (the hold ceiling lives INSIDE record_held,
+# which never got a stream). Replayed cold, the same collision throws
+# paInternalError (-9986) or an AUHAL -50 followed by a segfault.
+# Never held across a read or a write. The mouth borrows it for its
+# output stream (Mouth._get_out): an open racing a stop is the collision,
+# whichever direction each stream faces.
+PA_LOCK = threading.RLock()
+
+
+@contextlib.contextmanager
 def _open_mic():
-    """Open the capture stream on the configured mic.
+    """The capture stream, started; stopped and closed on exit. Both
+    ends run under PA_LOCK so no two threads are ever inside PortAudio's
+    device code at once (see PA_LOCK)."""
+    with PA_LOCK:
+        stream = _new_mic()
+        stream.start()
+    try:
+        yield stream
+    finally:
+        with PA_LOCK:
+            try:
+                stream.stop()
+            finally:
+                stream.close(ignore_errors=True)
+
+
+def _new_mic():
+    """Open (not start) the capture stream on the configured mic.
 
     Degrades to the system default if that device will not open --
     unplugged between the lookup and the open, busy, or refusing the
@@ -291,14 +397,36 @@ def warm():
         if _model is None:
             if _apple_gpu_available():
                 import mlx_whisper
-                repo = _mlx_repo(CFG["stt_model"])
-                log(f"[ears] loading {CFG['stt_model']} on the Apple GPU...")
+                import mlx.core as mx
+                # Cap the Metal scratch cache before the first allocation.
+                # Unbounded it grows with every new audio LENGTH and never
+                # gives anything back -- the single largest block of memory
+                # this process holds. See stt_cache_mb in config.py.
+                if CFG["stt_cache_mb"]:
+                    mx.set_cache_limit(int(CFG["stt_cache_mb"]) * 1024 * 1024)
+                quant = str(CFG["stt_quant"] or "")
+                repo = _mlx_ready(_mlx_repo(CFG["stt_model"], quant))
+                log(f"[ears] loading {CFG['stt_model']}"
+                    f"{' ' + quant if quant else ''} on the Apple GPU...")
                 # This API has no separate load call: the first transcribe
                 # pulls and caches the weights. Warm on a beat of silence so
                 # the first real utterance does not pay for it.
-                mlx_whisper.transcribe(np.zeros(RATE // 10, dtype=np.float32),
-                                       path_or_hf_repo=repo, language="en",
-                                       verbose=None)
+                silence = np.zeros(RATE // 10, dtype=np.float32)
+                try:
+                    mlx_whisper.transcribe(silence, path_or_hf_repo=repo,
+                                           language="en", verbose=None)
+                except Exception as e:
+                    # A quantized conversion that is missing from the Hub (or
+                    # a machine that is offline with only the fp16 weights
+                    # cached) must not take the voice line down: the full
+                    # model is the same model, only heavier.
+                    if not quant:
+                        raise
+                    log(f"[ears] {repo} unavailable ({type(e).__name__}); "
+                        f"falling back to the full-precision weights.")
+                    repo = _mlx_ready(_mlx_repo(CFG["stt_model"]))
+                    mlx_whisper.transcribe(silence, path_or_hf_repo=repo,
+                                           language="en", verbose=None)
                 _model, _backend = repo, "mlx"
             else:
                 from faster_whisper import WhisperModel
@@ -666,11 +794,61 @@ def _speechlike(pcm: np.ndarray) -> bool:
             and _flatness(pcm) <= _FLAT_MAX)
 
 
+# A speech DETECTOR in front of the transcriber: silero VAD, the same model
+# faster-whisper runs as vad_filter and mlx_whisper does not. It answers the
+# one question whisper's own scores cannot on a big decoder: was anybody
+# talking? large-v3-turbo hands pure room noise back as a confident
+# "Thank you." -- no_speech 0.00, logprob -0.3, the exact numbers of a real
+# "Bye." -- 24 clips in 24, where small.en scored the same ghosts no_speech
+# 0.9 and lost them at the gate. webrtcvad cannot help (it calls loud hiss
+# speech) and spectral flatness cannot either (a fan or a rumble is as
+# peaky as a vowel). Silero was trained for exactly this and is already in
+# the venv (openwakeword ships it for wake mode). ~10 ms per clip on CPU.
+_VAD_FRAME = 480          # 30 ms, the size the model was trained on
+_vad = None
+_vad_lock = threading.Lock()
+
+
+def _speech_prob(pcm: np.ndarray):
+    """Silero's PEAK per-frame speech probability over the clip, or None
+    when the detector cannot run (openwakeword missing, model file gone).
+    None is "no opinion" and leaves the gate open exactly as before. The
+    peak, not the mean: a one-word reply sits in 300 ms of a clip the
+    capture pads with 1.5 s of pre-roll and endpoint silence, and the
+    mean of that is the silence. The LSTM keeps state across frames, so
+    the clip is fed in order from a clean reset -- that is what makes the
+    per-frame numbers mean what silero's paper says they mean."""
+    global _vad
+    try:
+        with _vad_lock:
+            if _vad is None:
+                from openwakeword.vad import VAD
+                _vad = VAD()
+            _vad.reset_states()
+            n = len(pcm) // _VAD_FRAME
+            if n < 1:
+                return 0.0
+            x = pcm.astype(np.int16)
+            return max(float(_vad.predict(x[i * _VAD_FRAME:(i + 1) * _VAD_FRAME]))
+                       for i in range(n))
+    except Exception:
+        return None
+
+
 def transcribe(pcm: np.ndarray) -> str:
     """int16 mono 16kHz -> text. Bracketed non-speech markers that
     whisper emits ([BLANK_AUDIO], [SIGHS], (coughs)...) are stripped;
     if nothing remains, it was silence."""
     model = warm()
+    if CFG["stt_vad"]:
+        p = _speech_prob(pcm)
+        if p is not None and p < CFG["stt_vad"]:
+            # Nobody spoke: whatever whisper would say about this clip is
+            # invented. Logged with the number so the knob is tuned from
+            # the log, like the other two gates.
+            log(f"[ears] (no speech in it -- VAD {p:.2f} under "
+                f"{CFG['stt_vad']:.2f}, not transcribed)")
+            return ""
     try:
         from backtalk import signals
         if signals.unsummoned():
@@ -683,7 +861,11 @@ def transcribe(pcm: np.ndarray) -> str:
     except Exception:
         signals = None
     audio = pcm.astype(np.float32) / 32768.0
-    lang = "en" if CFG["stt_model"].endswith(".en") else None
+    # An English-only model needs no telling; a multilingual one is told
+    # (stt_language) rather than left to guess per clip -- whisper's
+    # detector on a two-second utterance is famous for picking Welsh.
+    lang = ("en" if CFG["stt_model"].endswith(".en")
+            else (CFG["stt_language"] or None))
     # PRIME ON SPEECH ONLY. The hint's benefit and its cost land on disjoint
     # inputs: on a real utterance it is the only reason small.en spells the
     # persona's name (measured on this machine, 3 clips in 4 with it, 0 in 4
@@ -717,7 +899,7 @@ class Ears:
 
     def listen_once(self, gate=None, timeout_s: float | None = None,
                     abort=None, want_audio: bool = False,
-                    on_speech=None):
+                    on_speech=None, wake=None):
         """Block until one utterance completes; return transcript
         (or None on timeout). An `abort` callable is checked every
         frame; returning True closes the mic and returns None, which
@@ -757,6 +939,10 @@ class Ears:
         speech_total = 0
         in_utterance = False
         elapsed = 0.0
+        # `wake(frame)` is the audio-side name detector (wakeword_audio):
+        # while it is given and has not fired, nothing opens -- the VAD's
+        # opinion of the room does not matter until the name is heard.
+        woke = False
 
         try:
             with _open_mic() as stream:
@@ -800,6 +986,19 @@ class Ears:
                         # (the old 240ms clipped sentence openings).
                         if len(ring) > 12:
                             ring.pop(0)
+                        if wake is not None and not woke:
+                            if not wake(mono):
+                                continue
+                            # The name was just said: open NOW, with the ring
+                            # as pre-roll so whisper hears it too, and blink
+                            # the face on the syllable -- the on-time
+                            # listening signal this loop always wanted.
+                            woke = True
+                            in_utterance = True
+                            frames = ring[:]
+                            silence_run = 0
+                            _sig("wake")     # a blink the caller may trust
+                            continue
                         speech_run = speech_run + 1 if is_speech else 0
                         if speech_run >= OPEN_FRAMES:
                             in_utterance = True
@@ -816,7 +1015,10 @@ class Ears:
                             silence_run += 1
                         if silence_run >= self.silence_frames or \
                            len(frames) * FRAME_MS / 1000 > MAX_UTTER_S:
-                            if speech_total < 8:
+                            # A bare "Jarvis." is mostly in the pre-roll, so
+                            # the blip test would throw a real summons away;
+                            # the detector already vouched for it.
+                            if speech_total < 8 and not woke:
                                 # <240ms of actual speech: a noise blip, not
                                 # a sentence — keep listening
                                 in_utterance = False

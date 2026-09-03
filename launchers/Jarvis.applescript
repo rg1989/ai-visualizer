@@ -3,6 +3,8 @@
    process tree down and lets the iTerm window close with it. If you close
    the iTerm window instead, the app notices and quits itself, so the Dock
    never claims Jarvis is running when it is not.
+   On launch it asks where the face should live: a browser tab, or an
+   overlay over every window (ai-visualizer/bin/overlay.sh, Opt+Cmd).
    Build:  jarvisctl build   (osacompile alone drops the icon)  *)
 
 property ctl : ""
@@ -29,6 +31,18 @@ on run
 		tell application "iTerm" to activate -- already up; just show it
 		return
 	end if
+	-- One app, two faces: ask. Overlay is the face over every window (hold
+	-- Opt+Cmd to use it); Browser is the face in a tab. Cancel quits us,
+	-- or a stay-open applet with no agent would sit in the Dock forever.
+	set variant to ""
+	activate
+	try
+		set choice to button returned of (display dialog "Where should the face live?" buttons {"Cancel", "Browser", "Overlay"} default button "Overlay" with title "AI Visualizer" with icon (path to resource "applet.icns"))
+		if choice is "Overlay" then set variant to "overlay"
+	on error number -128
+		quit
+		return
+	end try
 	set wasRunning to running of application "iTerm"
 	tell application "iTerm"
 		-- `launch`, not `activate`: activating a cold iTerm sends it an open
@@ -42,7 +56,7 @@ on run
 			-- iTerm splits `command` itself and does NOT run it through a shell,
 			-- so `quoted form of` (single quotes) would arrive literally. Hand it
 			-- to sh with double quotes instead.
-			set win to (create window with default profile command ("/bin/sh -c \"" & ctl & " run\""))
+			set win to (create window with default profile command ("/bin/sh -c \"" & ctl & " run " & variant & "\""))
 		else
 			-- Cold start: iTerm opens exactly ONE window for itself. Creating
 			-- ours beside it is the second window nobody asked for -- so wait
@@ -56,9 +70,9 @@ on run
 				set win to current window
 				-- `write text` DOES go through the shell, unlike `command`
 				-- above, so here quoting is both possible and required.
-				tell current session of win to write text (quoted form of ctl & " run")
+				tell current session of win to write text (quoted form of ctl & " run " & variant)
 			else
-				set win to (create window with default profile command ("/bin/sh -c \"" & ctl & " run\""))
+				set win to (create window with default profile command ("/bin/sh -c \"" & ctl & " run " & variant & "\""))
 			end if
 		end if
 		activate

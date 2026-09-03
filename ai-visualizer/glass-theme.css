@@ -49,6 +49,15 @@
                      system-ui, sans-serif;
 }
 
+/* Over a desktop (?overlay=1, bin/overlay.sh) a card sits on other people's
+   text, not on the face's dark board, so it goes denser there: the theme's
+   own card colour (a token, set inline by glass.js) painted three times
+   keeps its hue and lifts .85 to .997, opaque to the eye. */
+html.overlay .glass-card {
+  background: linear-gradient(var(--glass-bg), var(--glass-bg)),
+              linear-gradient(var(--glass-bg), var(--glass-bg)), var(--glass-bg);
+}
+
 /* VT323 ships in assets/ — no hotlinking, works from file:// */
 @font-face {
   font-family: "VT323";
@@ -253,12 +262,156 @@
   color: var(--glass-text);
 }
 .glass-timer-done { color: var(--glass-accent); }
+
+/* clock: the timer's sizing idiom, telling the time of day. Digits scale
+   with the card (34cqmin) so "enlarge it" enlarges the clock, and never
+   with the screen. Exists so nobody has to hand-write an html card for
+   the single most common thing asked of a display. */
+.glass-clock { container-type: size; }
+.glass-clock .glass-body {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  overflow: hidden;
+}
+.glass-clock-big {
+  font-family: var(--glass-title-font);
+  font-size: clamp(30px, 34cqmin, 200px);
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  color: var(--glass-accent);
+}
+.glass-clock-label {
+  font-family: var(--glass-title-font);
+  font-size: clamp(13px, 9cqmin, 22px);
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--glass-text-dim);
+}
 .glass-timer-label {
   font-family: var(--glass-title-font);
   font-size: clamp(13px, 9cqmin, 22px);
   letter-spacing: .12em;
   text-transform: uppercase;
   color: var(--glass-text-dim);
+}
+
+/* sysmon: the machine at a glimpse. Type scales with the card (cqmin)
+   like the clock's digits; the two bars are the things that fill up, and
+   they turn warm past 85%. Colours come from the face's theme first
+   (--av-*), the glass palette second, so the card follows the agent. */
+.glass-sysmon { container-type: size; }
+.glass-sysmon .glass-body {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: clamp(2px, 1.8cqmin, 9px);
+  overflow: hidden;
+  font-family: var(--glass-title-font);
+  font-size: clamp(12px, 7.5cqmin, 26px);
+  letter-spacing: .05em;
+}
+.glass-sys-row { display: flex; align-items: center; gap: .6em; line-height: 1.1; }
+.glass-sys-k {
+  flex: 0 0 4.4em;
+  font-size: .78em;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: var(--av-dim, var(--glass-text-dim));
+}
+.glass-sys-v {
+  margin-left: auto;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  color: var(--av-ink, var(--glass-text));
+}
+/* both bars the same length: the value column is fixed, wide enough for "7.3/16 GB" */
+.glass-sys-bar .glass-sys-v { flex: 0 0 5em; text-align: right; color: var(--av-accent, var(--glass-accent)); }
+.glass-sys-track {
+  flex: 1 1 auto;
+  height: .5em;
+  border: 1px solid var(--av-card-line, var(--glass-line-dim));
+  border-radius: var(--glass-radius-sm);
+  background: rgba(0, 0, 0, .35);
+  overflow: hidden;
+}
+.glass-sys-fill {
+  height: 100%;
+  width: 0;
+  background: var(--av-accent, var(--glass-accent));
+  box-shadow: 0 0 8px var(--av-glow, var(--av-accent, var(--glass-accent)));
+  transition: width .6s ease;
+}
+.glass-sys-fill.hot { background: #ff7a5c; box-shadow: 0 0 8px #ff7a5c; }
+.glass-sys-label {
+  margin-top: .15em;
+  font-size: .7em;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  text-align: center;
+  color: var(--av-dim, var(--glass-text-dim));
+}
+
+/* tasks: the assistant's background work. A running row spins and counts,
+   a finished one keeps its verdict for a moment. The card HUGS its rows
+   (align-self: start) instead of filling its slot -- three lines of
+   work must not float in a box of dead space -- so type scales by the
+   card's width, the one dimension it still has. */
+.glass-tasks { container-type: inline-size; align-self: start; height: auto; min-height: 0; }
+.glass-tasks .glass-body {
+  display: flex;
+  flex-direction: column;
+  gap: .22em;
+  overflow: hidden;
+  font-family: var(--glass-title-font);
+  font-size: clamp(12px, 3.6cqw, 20px);
+  letter-spacing: .05em;
+}
+.glass-task { display: flex; align-items: center; gap: .6em; line-height: 1.15; }
+.glass-task-mark {
+  flex: 0 0 .9em;
+  width: .9em;
+  height: .9em;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  color: var(--av-accent, var(--glass-accent));
+}
+.glass-task.running .glass-task-mark {
+  border: 2px solid var(--av-card-line, var(--glass-line-dim));
+  border-top-color: var(--av-accent, var(--glass-accent));
+  border-radius: 50%;
+  animation: glass-spin 1s linear infinite;
+}
+@keyframes glass-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .glass-task.running .glass-task-mark { animation: none; border-top-color: var(--av-card-line, var(--glass-line-dim)); }
+}
+.glass-task-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--av-ink, var(--glass-text));
+}
+.glass-task-time {
+  flex: 0 0 auto;
+  font-variant-numeric: tabular-nums;
+  color: var(--av-dim, var(--glass-text-dim));
+}
+.glass-task.failed .glass-task-mark { color: #ff7a5c; }
+.glass-task.stopped .glass-task-mark,
+.glass-task.stopped .glass-task-label { color: var(--av-dim, var(--glass-text-dim)); }
+.glass-task-none {
+  font-size: .8em;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  text-align: center;
+  color: var(--av-dim, var(--glass-text-dim));
 }
 
 /* list — checklist, CSS check boxes (no glyph-coverage gamble) */
@@ -606,3 +759,31 @@
   .glass-player .wa-marquee.run span,
   .glass-player .wa-b.wa-need { animation: none; }
 }
+
+/* the card's remaining lifetime, in the header slot the id used to take;
+   the id itself is the title's tooltip now. Blank for pinned cards. */
+.glass-ttl {
+  flex: 0 0 auto;
+  margin-left: auto;
+  opacity: .5;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: .04em;
+}
+.glass-expiring .glass-ttl { opacity: 1; color: var(--glass-accent); }
+
+/* a note whose body is one short plain line is a hero line: the card hugs
+   it (server picks 3x1) and the type fills the card instead of hiding in a
+   corner at 14px. */
+.glass-note { container-type: size; }
+.glass-note.glass-short .glass-body {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  overflow: hidden;
+  font-family: var(--glass-title-font);
+  font-size: clamp(18px, 46cqh, 56px);
+  line-height: 1.1;
+}
+.glass-note.glass-short .glass-body p { margin: 0; }

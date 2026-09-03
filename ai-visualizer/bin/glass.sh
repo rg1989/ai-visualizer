@@ -17,8 +17,8 @@
 # --port flag — the config is the one source of truth, and a flag here
 # would let this script and the server quietly disagree about where the
 # glass lives.
-PORT="$(python3 -c 'import json,sys; print(int(json.load(open(sys.argv[1])).get("port", 8790)))' \
-        "$(dirname "$0")/../ai-visualizer.json" 2>/dev/null || echo 8790)"
+PORT="${GLASS_PORT:-$(python3 -c 'import json,sys; print(int(json.load(open(sys.argv[1])).get("port", 8790)))' \
+        "$(dirname "$0")/../ai-visualizer.json" 2>/dev/null || echo 8790)}"
 URL="http://127.0.0.1:$PORT/cmd"
 
 # More than one argument means the JSON was not quoted and the shell
@@ -87,5 +87,23 @@ except (ValueError, KeyError, TypeError):
         sys.stderr.write("reply began: %s\n" % raw.strip()[:200])
     sys.exit(1)
 print(json.dumps(reply, indent=2))
-sys.exit(0 if ok else 1)
+if not ok:
+    sys.exit(1)
+# An html card came back with the face measurement. A card nobody can read
+# is a FAILED show, and a non-zero exit is what an agent reliably reacts to.
+for w in reply.get("warnings") or []:
+    sys.stderr.write("glass.sh: warning: %s\n" % w)
+if "rendered" in reply:
+    rd = reply.get("render")
+    if rd is None:
+        if not reply.get("viewers"):
+            sys.stderr.write("glass.sh: no face is watching, so nothing measured the card\n")
+        else:
+            sys.stderr.write("glass.sh: the face did not report a measurement within 3 s -- run glass-state.sh to look\n")
+    elif reply.get("render_ok") is False:
+        sys.stderr.write("glass.sh: RENDER PROBLEM -- rendered: %s\n" % reply["rendered"])
+        sys.exit(3)
+    else:
+        sys.stderr.write("glass.sh: rendered: %s\n" % reply["rendered"])
+sys.exit(0)
 ' "$URL"

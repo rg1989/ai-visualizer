@@ -40,6 +40,8 @@ import json
 import os
 import subprocess
 import sys
+
+from backtalk.vlog import log
 import time
 
 import numpy as np
@@ -102,16 +104,46 @@ def unsummoned() -> bool:
     return _mic_mode == "wake" and _state == "idle"
 
 
-def set_mic(mode: str, hot: bool = False):
+PTT_STALE_S = 1.0
+
+
+def set_ptt_key(name: str = ""):
+    """Publish the talk key's name for the face page to bind (config
+    ptt_scope "face"). Empty = the page binds nothing. Never raises."""
+    try:
+        with open(os.path.join(_DIR, ".voice_ptt_key"), "w") as f:
+            f.write(str(name or "")[:32])
+    except OSError:
+        pass
+
+
+def face_ptt() -> tuple[bool, int]:
+    """(held, n): the face page's talk key, as the visualizer dropped it
+    in .voice_ptt. n counts presses. held reads False once the page's
+    re-post is older than PTT_STALE_S -- a tab closed mid-hold must not
+    leave the mic open. Path resolved per call so a test can move _DIR."""
+    try:
+        with open(os.path.join(_DIR, ".voice_ptt")) as f:
+            d = json.load(f)
+        held = (bool(d.get("held"))
+                and time.time() - float(d.get("t", 0)) < PTT_STALE_S)
+        return held, int(d.get("n", 0))
+    except (OSError, ValueError, TypeError, AttributeError):
+        return False, 0
+
+
+def set_mic(mode: str, hot: bool = False, hush: bool = False):
     """Publish the microphone mode ("ptt" | "open" | "wake") so a face
     can show at a glance whether the room is being listened to. hot
     marks a live wake-mode follow-up window (no wake word needed right
-    now). Never raises."""
+    now). hush marks "stop listening": the room is off the record until
+    the person comes back, and the overlay window hides itself on it
+    (facewin fades at once and ignores her "Stopped."). Never raises."""
     global _mic_mode
     _mic_mode = mode
     try:
         with open(_MIC_FILE, "w") as f:
-            f.write(mode + (" hot" if hot else ""))
+            f.write(mode + (" hot" if hot else "") + (" hush" if hush else ""))
     except OSError:
         pass
 
@@ -220,6 +252,15 @@ def clear_mic():
 def set_state(name: str):
     """Write the state. Never raises — the show must go on."""
     global _state
+    if name != _state:
+        # Every transition, with its caller: the face's animations follow
+        # this file and nothing else, so a blink nobody meant is found here.
+        try:
+            _f = sys._getframe(1)
+            _who = f"{_f.f_code.co_name}:{_f.f_lineno}"
+        except Exception:
+            _who = "?"
+        log(f"[state] {_state} -> {name}  ({_who})")
     _state = name
     try:
         with open(_STATE_FILE, "w") as f:

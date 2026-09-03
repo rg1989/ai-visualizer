@@ -35,7 +35,8 @@ phrase — the name alone chimes and opens a short command window,
 "name, do X" is a one shot, and everything else is ignored) /
 "stop listening" (stop now: in wake or push-to-talk mode it just
 answers "Stopped."; an open mic drops to wake word mode, so nothing
-is heard again until the name is said) /
+is heard again until the name is said; the overlay window fades at
+once and stays down until you address her again) /
 "stop asking for permission" and "start asking again" (permissions,
 called auto-approve, a different axis than the microphone on purpose).
 And with permission_mode "ask" (the default), gated tool calls ASK OUT
@@ -77,7 +78,7 @@ from backtalk.config import CFG, REPO
 from backtalk.ears import (Ears, explain_audio_failure, record_held,
                            set_prompt as set_stt_prompt, warm as warm_ears)
 from backtalk.mouth import Mouth, warm as warm_voice
-from backtalk.ptt import PTTListener
+from backtalk.ptt import FacePTT, PTTListener
 from backtalk.vlog import log
 
 # The provider profiles — the env and model ids behind CLAUDE vs Z.AI —
@@ -137,6 +138,15 @@ _AUTOAPPROVE = {"on": False}
 # hush: "stop listening" — the room is off the record until the
 # person deliberately comes back (wake word, talk key, typing).
 _MIC = {"mode": "ptt", "gen": 0, "btn": False, "hush": False}
+
+
+def _unhush():
+    """Coming back (talk key, wake word, typing) ends the hush -- and
+    says so on the mic line, which is what lets the overlay wake again
+    (it hides while the line reads hush, see signals.set_mic)."""
+    if _MIC["hush"]:
+        _MIC["hush"] = False
+        signals.set_mic(_MIC["mode"])
 # THE BRAIN PROVIDER — which back end the `claude` CLI actually talks
 # to: "claude" (Anthropic) or "zai" (the GLM coding plan). The CLI
 # inherits os.environ, so a switch is an env change plus a brain
@@ -1029,24 +1039,37 @@ def _face_typed_reader(q: "queue.Queue[str]"):
     feeds, so a line typed in the browser is a first-class turn: console
     verbs, permission answers, enrollment, all of it.
 
-    ponytail: one file, last write wins. Two lines landing inside one
-    200ms poll would lose the first, which a person typing a prompt
-    cannot do; go newline-delimited if the box ever gets a scripted
-    sender.
+    The file is a queue: one JSON string per line, appended (the box
+    got a scripted sender -- bin/task.py's finished-task reports -- and
+    two of those inside one 200ms poll used to lose the first). The
+    rename takes the whole file atomically: a writer that lands after
+    it starts a fresh one, nothing is read half-written or lost. A bare
+    non-JSON line still reads as one message, for an older server.
     """
     path = os.path.join(signals._DIR, ".voice_typed")
+    busy = path + ".busy"
     while True:
         time.sleep(0.2)
         try:
-            with open(path, encoding="utf-8") as f:
+            os.rename(path, busy)
+            with open(busy, encoding="utf-8") as f:
                 blob = f.read()
-            os.remove(path)
+            os.remove(busy)
         except OSError:
             continue
-        text = _join_paste(blob)        # multi-line paste -> one message
-        if text:
-            log("[typed] a line from the face")
-            q.put(text)
+        for line in blob.splitlines():
+            if not line.strip():
+                continue
+            try:
+                msg = json.loads(line)
+                if not isinstance(msg, str):
+                    msg = line
+            except ValueError:
+                msg = line
+            text = _join_paste(msg)         # multi-line paste -> one message
+            if text:
+                log("[typed] a line from the face")
+                q.put(text)
 
 
 def _typed_reader(q: "queue.Queue[str]"):
@@ -1157,6 +1180,32 @@ def _typed_reader(q: "queue.Queue[str]"):
                 sys.stdout.flush()
 
 
+_MD_EMPHASIS = re.compile(r"(\*\*|__)(.+?)\1|(?<!\w)([*_])(?!\s)(.+?)(?<!\s)\3(?!\w)")
+_MD_HEAD = re.compile(r"^\s*#{1,6}\s+")
+_MD_BULLET = re.compile(r"^\s*(?:[-*\u2022]|\d+[.)])\s*")
+
+
+def _speakable(raw: str) -> str:
+    """One chunk of model text -> the words a voice can say. Backticks and
+    fences go; **bold** and _italic_ lose their marks; a heading loses its
+    hashes; a list marker at the front of a chunk goes, so a bare "1." or
+    "- " chunk (a list the model was told not to write) becomes nothing and
+    is skipped by the caller. The chat crawl shows the same cleaned text."""
+    s = raw.replace("`", "")
+    s = _MD_EMPHASIS.sub(lambda m: m.group(2) if m.group(2) is not None else m.group(4), s)
+    s = _MD_EMPHASIS.sub(lambda m: m.group(2) if m.group(2) is not None else m.group(4), s)  # nested
+    s = _MD_HEAD.sub("", s)
+    s = _MD_BULLET.sub("", s)
+    s = " ".join(s.split()).strip()
+    # A reply of exactly [silent] is the agent choosing to say nothing -- the
+    # watch-over turns ask for it when nothing is happening. Telling a model
+    # "say nothing" gets "Nothing -- no one in frame" said aloud; a sentinel
+    # it can emit, and the mouth swallows, actually stays quiet.
+    if s.strip("[]() .").lower() == "silent":
+        return ""
+    return s
+
+
 async def speak_reply(brain: WarmBrain, mouth: Mouth, text: str):
     """First sentence ships alone (fast start); the rest go in
     2-sentence breaths — fuller chunks get livelier prosody (single
@@ -1181,8 +1230,9 @@ async def speak_reply(brain: WarmBrain, mouth: Mouth, text: str):
         if found:
             pending += [d.strip() for d in found if d.strip()]
         raw = _DIRECTION_TAG.sub(" ", raw)
-        # TTS hygiene: backticks and markdown fences are never speakable.
-        s = " ".join(raw.replace("`", "").split()).strip()
+        # TTS hygiene: markdown is never speakable -- "**pale green**" was
+        # read aloud as "asterisk asterisk pale green asterisk asterisk".
+        s = _speakable(raw)
         if not s:
             return
         # The crawl bubble is NOT published here: it rides the chunk to
@@ -1428,11 +1478,26 @@ async def amain():
             else f"wake word ('{CFG['wake_phrases'][0]}', talk key works)"
             if _MIC["mode"] == "wake"
             else f"push-to-talk ({CFG['ptt_key']})")
+    if CFG.get("ptt_scope") == "face":
+        # The face page binds the key only while this file names one.
+        signals.set_ptt_key(CFG["ptt_key"])
+        mode += f" -- the talk key ({CFG['ptt_key']}) counts only while " \
+                f"the face page has focus"
+    else:
+        signals.set_ptt_key("")
     log(f"[backtalk] up — agent={NAME} dir={CFG['agent_dir']} "
         f"model={brain.model} mic={mode} "
         f"(say 'goodbye {NAME.lower()}' to hang up)")
+    # Load the voice BEFORE the curtain lifts. Kokoro's first load is ~3 s
+    # and it used to happen inside the first say(): the face dropped the
+    # curtain, showed "speaking", and stayed silent for the whole load.
+    signals.set_stage("loading the voice")
+    try:
+        warm_voice()
+    except Exception as e:
+        log(f"[mouth] voice warm-up failed ({e!r}); loading on first use")
     signals.set_stage("")
-    signals.set_ready(True)     # the curtain lifts on the first word
+    signals.set_ready(True)     # the curtain lifts; the greeting is next
     mouth.say(greeting)
 
     loop = asyncio.get_event_loop()
@@ -1453,7 +1518,8 @@ async def amain():
     # guards its own file with "a stale pick must not auto-answer"; these
     # two never got the same treatment. Cleared once, here, before anything
     # is watching.
-    for _stale in (".voice_stop", ".voice_brain_pick", ".voice_typed"):
+    for _stale in (".voice_stop", ".voice_brain_pick", ".voice_typed",
+                   ".voice_ptt"):
         try:
             os.remove(os.path.join(signals._DIR, _stale))
             log(f"[face] cleared a stale {_stale} from a previous session")
@@ -1590,6 +1656,11 @@ async def amain():
     speak_task: asyncio.Task | None = None
     typed_q: "queue.Queue[str]" = queue.Queue()
     threading.Thread(target=_typed_reader, args=(typed_q,), daemon=True).start()
+    # Memory-pressure evictor: idle means no turn is live, so a model may be
+    # dropped and re-warmed without anyone waiting on it mid-sentence.
+    from backtalk import pressure
+    pressure.start(lambda: (signals.state() == "idle"
+                            and not mouth.turn_live and not mouth.speaking))
     threading.Thread(target=_face_typed_reader, args=(typed_q,),
                      daemon=True).start()
     typed_fut: asyncio.Future | None = None
@@ -1882,18 +1953,26 @@ async def amain():
             resp = ""
             _MIC["hush"] = True
             _MIC["gen"] += 1
+            # A follow-up window ALREADY open must not outlive the order.
+            # Field-caught: _conv_watch was mid-sleep when "stop
+            # listening" arrived, woke after "Stopped." and re-lit
+            # LISTENING for ten more seconds -- hush only stops NEW
+            # windows. Cancelled before the reply is even queued.
+            if conv_task and not conv_task.done():
+                conv_task.cancel()
+            # hush rides the mic line too: the overlay window fades on it.
             if _MIC["mode"] == "open":
                 # An open mic can't be hushed, only narrowed: drop to
                 # wake word so nothing is heard until it's summoned.
                 _MIC["mode"] = "wake"
                 _write_config_key("mic_mode", "wake")
                 log("[console] mic_mode -> wake (stop listening)")
-                signals.set_mic("wake")
+                signals.set_mic("wake", hush=True)
                 first = CFG["wake_phrases"][0]
                 mouth.say(f"Switching to wake word mode. Say {first} "
                           "when you need me.")
             else:
-                signals.set_mic(_MIC["mode"])
+                signals.set_mic(_MIC["mode"], hush=True)
                 signals.set_state("idle")
                 mouth.say("Stopped.")
         elif verb == "rename":
@@ -2020,7 +2099,7 @@ async def amain():
         the tag reaches only the BRAIN — console phrases, quit, and
         permission answers all match on the raw words."""
         nonlocal speak_task
-        _MIC["hush"] = False   # being addressed at all ends the hush
+        _unhush()              # being addressed at all ends the hush
         log(f"[you{'/' + speaker if speaker else ''}]    {text}")
         signals.chat_add("you", speaker, text)
         # A pending spoken permission ask owns the next utterance IF
@@ -2578,7 +2657,11 @@ async def amain():
         # in "open" mode; a mode switch bumps _MIC["gen"], the abort
         # callable closes the in-flight open mic promptly, and any
         # capture born under an old gen is discarded unprocessed.
-        ptt = PTTListener(CFG["ptt_key"])
+        # ptt_scope "face": the key lives on the face page and reaches
+        # here over the bus -- no global hook, no press from another
+        # window ever counts (see ptt.FacePTT).
+        ptt = (FacePTT() if CFG.get("ptt_scope") == "face"
+               else PTTListener(CFG["ptt_key"]))
         press_fut: asyncio.Future | None = None
         mic_fut: asyncio.Future | None = None
         mic_win_seq: int | None = None   # set when mic_fut IS the wake window
@@ -2665,8 +2748,13 @@ async def amain():
                 #  - MID-TURN. The ring belongs to the answer in flight.
                 #    Room noise flipped thinking -> listening -> thinking
                 #    and made a long build look like it was oscillating.
-                if (signals.unsummoned() or mouth.turn_live
-                        or mouth.speaking):
+                # "wake" means the audio detector heard the NAME: that blink
+                # is true, cold mode or not. A plain VAD open in cold mode
+                # shows NOTHING: the mic is always open, so "hearing" is not
+                # information, and from across the room it reads as
+                # listening -- the very lie this guard exists to stop.
+                if on != "wake" and (signals.unsummoned() or mouth.turn_live
+                                     or mouth.speaking):
                     return
                 heard_prev["s"] = signals.state()
                 signals.set_state("listening")
@@ -2743,14 +2831,23 @@ async def amain():
                         # (enrollment needs the raw audio regardless)
                         ident = (_MIC["mode"] == "open"
                                  and not _ENROLL["on"])
+                        # Cold wake mode: the name must be HEARD (wakeword_audio)
+                        # before anything is captured, let alone transcribed.
+                        # Open mode and an open wake window listen as before.
+                        from backtalk import wakeword_audio
+                        wk = (wakeword_audio.feed
+                              if _MIC["mode"] == "wake" and wakeword_audio.enabled(
+                                  _WAKE["name"] or CFG.get("name"))
+                              else None)
                         mic_fut = loop.run_in_executor(
-                            None, lambda g=g, ident=ident: (
+                            None, lambda g=g, ident=ident, wk=wk: (
                                 g, *_mic_turn(
                                     lambda: ears.listen_once(
                                         gate=mic_gate,
                                         abort=lambda: _MIC["gen"] != g,
                                         want_audio=True,
-                                        on_speech=_heard),
+                                        on_speech=_heard,
+                                        wake=wk),
                                     identify=ident)))
                 waiters.add(mic_fut)
             done, _ = await asyncio.wait(
@@ -2944,6 +3041,7 @@ async def amain():
                                     speak_task.cancel()
                                     mouth.shut_up()
                                 log("[wake] woke (window open)")
+                                _unhush()   # the name is coming back
                                 signals.static_stop()
                                 signals.play_cue(wake_cue)
                                 signals.set_state("listening")
@@ -2991,14 +3089,28 @@ async def amain():
                 # press only silences playback and records the answer.
                 mouth.shut_up()
                 signals.static_stop()            # button kills the static too
+                _unhush()                        # the button = coming back
                 signals.set_state("listening")
                 mouth.ducker.speech_start()      # duck NOW, while you talk
                 print("[ptt] recording (release to send)...", flush=True)
                 _MIC["btn"] = True               # open mic yields to the button
                 try:
-                    text, pcm = await loop.run_in_executor(
-                        None, lambda: record_held(ptt.is_held,
-                                                  want_audio=True))
+                    # record_held's own ceiling is 60 s, plus whisper on
+                    # a minute of audio. Past that the mic thread is
+                    # wedged inside the audio system (a CoreAudio
+                    # deadlock did exactly this) and the face must not
+                    # sit on "listening" for the rest of the day.
+                    text, pcm = await asyncio.wait_for(
+                        loop.run_in_executor(
+                            None, lambda: record_held(ptt.is_held,
+                                                      want_audio=True)),
+                        timeout=120)
+                except asyncio.TimeoutError:
+                    log("[ears] the microphone is stuck inside the audio "
+                        "system -- restart the voice line")
+                    mouth.say("My microphone is stuck inside the audio "
+                              "system. I need a restart.")
+                    text, pcm = None, None
                 except Exception as e:
                     # A device-level failure gets plain words instead of a
                     # raw exception. The pre-flight at startup cannot catch
@@ -3017,6 +3129,11 @@ async def amain():
                 finally:
                     _MIC["btn"] = False
                 mouth.ducker.speech_end(0.2)     # snap back fast on release
+                # Into the LOG, beside the [state] lines: "recording" only
+                # went to stdout, so a hold whose ring dropped early left
+                # nothing to read afterwards.
+                log(f"[ptt] released after {time.monotonic() - press_t:.2f}s "
+                    f"({'speech' if text else 'nothing'})")
                 if text and _ENROLL["on"]:
                     if await _enroll_step(text, pcm):
                         signals.set_state("idle")

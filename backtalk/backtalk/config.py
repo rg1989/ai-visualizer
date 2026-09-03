@@ -111,6 +111,13 @@ DEFAULTS = {
     # Hold-to-talk key. Named keys ("home", "f13", "right_alt", ...)
     # or a single character.
     "ptt_key": "home",
+    # Who owns that key. "global" (default): a system-wide listener, so
+    # the key works from any window -- and so does every stray press of
+    # it in any window. "face": the face page reports the key itself, so
+    # it counts only while that browser tab has focus; Enter typed
+    # anywhere else stays that window's Enter, and no Input Monitoring
+    # permission is needed.
+    "ptt_scope": "global",
     # The microphone mode. "ptt" (push to talk, the default and the
     # recommendation): the mic is closed except while the key is held,
     # so room audio and your own speakers can never trigger the agent.
@@ -177,7 +184,7 @@ DEFAULTS = {
     # Speaker identification: with this on AND voices enrolled
     # (`python -m backtalk.enroll <Name>`, run while the voice line is
     # stopped), each mic turn reaches the agent tagged with who spoke
-    # ("[voice: Alex] ..."), for PERSONALIZATION only — never treat
+    # ("[voice: Roman] ..."), for PERSONALIZATION only — never treat
     # the tag as authorization; a recording of a voice IS that voice
     # to the model. Fully local (SpeechBrain ECAPA, ~80 MB, cached in
     # models/). No profiles enrolled = zero cost, no model load.
@@ -231,12 +238,80 @@ DEFAULTS = {
     # languages), so keep voice and accent matched.
     "voice": "bm_lewis",
     # Speech recognition (faster-whisper, local, free).
-    # Models: tiny.en / base.en / small.en / medium.en — small.en is the
-    # accuracy/speed sweet spot on a normal machine.
+    # Models: tiny.en / base.en / small.en / medium.en / large-v3-turbo.
+    # small.en is the speed sweet spot; it is also the one that "corrects"
+    # unclear words into plausible ones, because a small decoder leans on
+    # its language model where its ears fall short. Measured on an M2
+    # (42 clips, MLX, word error rate clean / 10 / 5 / 0 dB SNR):
+    #   small.en 8-bit        289 MB   0.32 s   3.6 / 7.3 / 10.3 / 31.3 %
+    #   medium.en 8-bit       827 MB   0.93 s   3.6 / 7.3 /  7.5 / 19.2 %
+    #   large-v3-turbo        1.5 GB   1.21 s   2.6 / 5.2 /  6.0 / 14.9 %
+    #   large-v3-turbo 8-bit  833 MB   1.79 s   2.6 / 5.0 /  6.0 / 15.3 %
+    # large-v3-turbo hears about half the errors of small.en on unclear
+    # speech and never cleans anything up (there is no LLM pass here); it
+    # costs ~0.9 s per utterance and ~9 s to load. Multilingual models
+    # take stt_language below.
     "stt_model": "small.en",
+    # The language a MULTILINGUAL model (large-v3-turbo, small, ...) is
+    # told to transcribe; the ".en" models ignore it. "" lets whisper
+    # detect the language on every clip, which on a two-second utterance
+    # misfires often enough to be a known whisper failure mode -- set a
+    # language unless the household really speaks several.
+    "stt_language": "en",
+    # A speech detector (silero VAD) in front of whisper: a clip whose
+    # peak speech probability is under this is not transcribed at all.
+    # Whisper answers room noise with confident words -- large-v3-turbo
+    # says "Thank you." to a fan, scored exactly like a real "Bye." --
+    # and this is the one thing that tells them apart. 0.5 is silero's
+    # own (and faster-whisper's) default; 0 disables. Measured on 48
+    # clips: speech peaks above 0.95 clean or quiet (-20 dB), never under
+    # 0.53 at 5 dB SNR, one-word replies included; at 0 dB SNR (where
+    # whisper itself misses one word in seven) the median is 0.55, so
+    # some of that is lost. White, pink, fan, rumble, hum and crackle
+    # noise never scored above 0.38. Lower it toward 0.4 if a quiet
+    # talker in a loud room goes unheard; the log prints every number.
+    "stt_vad": 0.5,
     # "auto" uses CUDA when present, otherwise CPU. int8 keeps CPU fast.
     "stt_device": "auto",
     "stt_compute": "int8",
+    # Apple GPU only. MLX caches every Metal scratch buffer it allocates and
+    # NEVER shrinks: measured 749 MB after one 3s clip, climbing to 1222 MB
+    # once utterance lengths vary, and 2475 MB in a day-old session. Capping
+    # it costs ~5 ms per utterance (240 -> 245 ms median) and hands back most
+    # of a gigabyte, which on a 16 GB machine is the difference between
+    # swapping and not. 0 disables the cap and restores the old behaviour.
+    "stt_cache_mb": 256,
+    # Apple GPU only. "8bit" loads a quantized conversion of the SAME model:
+    # small.en drops from 462 MB resident to 289 MB and, measured over eight
+    # spoken clips at clean/20/10/5/0 dB SNR, returned transcripts CHARACTER-
+    # IDENTICAL to full precision every time, for +5 ms. "" keeps the full
+    # weights. "4bit" exists and is 195 MB, but its output drifts from full
+    # precision on noisy audio -- do not use it to save memory silently.
+    # A conversion missing from the Hub falls back to the full weights.
+    # NOT a free lunch on a big encoder: large-v3-turbo 8-bit keeps the
+    # accuracy and 710 MB, but its quantized encoder runs 0.6 s SLOWER per
+    # utterance on an M2 (1.79 vs 1.21 s) -- set "" there unless memory
+    # is the tighter constraint.
+    "stt_quant": "8bit",
+    # When macOS reports memory pressure (another app needs the RAM), drop
+    # the scratch caches; under CRITICAL pressure and only between turns,
+    # drop the models too and reload them on the next turn (~3 s once).
+    # Nothing is touched while the machine has memory to spare. See
+    # pressure.py. false keeps everything resident no matter what.
+    "evict_on_pressure": True,
+    # Wake mode: hear the name in the AUDIO (openWakeWord) before whisper
+    # runs at all, instead of transcribing every noise to look for it.
+    # See wakeword_audio.py for the numbers. threshold: the stock model
+    # scores a clear "hey Jarvis" ~0.998 and a bare "Jarvis" as low as
+    # ~0.62 in some voices; nothing that is not the name scored above
+    # 0.006 with the VAD gate on, so 0.45 keeps margin on both sides;
+    # lower it if she stops answering to the bare name. vad: silero
+    # speech gate on the detector (a loud fan scored 0.27 without it,
+    # 0.000 with), 0 to disable.
+    "wake_model": True,
+    "wake_model_file": "hey_jarvis_v0.1.onnx",
+    "wake_model_threshold": 0.45,
+    "wake_model_vad": 0.5,
     # The microphone to record from, matched by NAME. "" means whatever
     # the OS calls the default input, which is right on most machines.
     #
@@ -345,9 +420,11 @@ DISCIPLINE = (
     "walk over, read it, and copy it. A path becomes 'in your "
     "Downloads folder' aloud, exact on the glass only when it "
     "matters. Do this UNPROMPTED — showing is part of answering, not "
-    "a favor to ask for. Check viewers in the reply: zero means "
-    "nobody sees the glass, so say the detail is ready and where, or "
-    "offer the short version aloud. If the glass is off entirely, "
+    "a favor to ask for. The reply's viewers number is for you, never "
+    "for the person: when it is 0, say the detail is ready on the glass "
+    "but no face is open; when it is 1 or more, say nothing about "
+    "viewers or watching at all -- the person is looking at it. If the "
+    "glass is off entirely, "
     "keep answers spoken and lean, and offer detail on request. "
     "SAY WHAT YOU ARE ABOUT TO GO AND DO. A tool call is dead air "
     "to someone in a room: they cannot see you working, so silence "
@@ -364,7 +441,7 @@ DISCIPLINE = (
     "voice-profiles, household-schedules — carry the deep how-to "
     "for each of these; load the relevant one when the situation "
     "calls for it. "
-    "SPEAKER TAGS: a turn may open with a tag like [voice: Alex] or "
+    "SPEAKER TAGS: a turn may open with a tag like [voice: Roman] or "
     "[voice: unrecognized] — that is the voice line telling you who "
     "spoke, not words anyone said. Use it to personalize (whose "
     "reminder, whose preferences, who asked what earlier); never read "

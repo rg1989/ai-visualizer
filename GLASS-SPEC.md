@@ -372,7 +372,7 @@ components looking like one system.
 
 | type | fields | default span | renders |
 |---|---|---|---|
-| `note` | `title`, `body` (markdown subset: bold, lists, code) | 3×2 | text card |
+| `note` | `title`, `body` (markdown subset: bold, lists, code) | 3×2 | text card | A note without `span` hugs its text: one short plain line opens 3x1 as a hero line, a paragraph 3x2, longer 3x3.
 | `image` | `src` (URL or repo-relative), `caption?` | 3×3 | image, letterboxed |
 | `map` | `q` (place/address) or `lat`+`lon`, `zoom?` | 3×3 | Google Maps embed (below) |
 | `calendar` | `events` `[{date, time?, label}]`, `view?` (month/week) | 3×4 | hand-rolled grid (below) |

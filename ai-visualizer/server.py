@@ -58,6 +58,8 @@ Run:
                                 the chosen state (idle|listening|thinking
                                 |speaking) so you can see a face perform
   python3 server.py --no-open   do not auto-open the browser
+  bin/overlay.sh                the face and the glass over every window,
+                                no browser (see bin/overlay.sh)
   python3 server.py --selfcheck
                                 prove the glass out in-process (placement,
                                 conflicts, singleton targeting, resize
@@ -69,6 +71,7 @@ Ctrl-C stops.
 import functools
 import ipaddress
 import json
+import shutil
 import math
 import mimetypes
 import os
@@ -318,6 +321,73 @@ def watch_face(url, gone_after=5.0):
             had = False
 
 
+# ---- the machine, for the sysmon card ---------------------------------------
+# psutil when it is there (Apple's Command Line Tools python ships it),
+# the kernel's free numbers otherwise. Sampled only when a card asks, so
+# nothing runs for a card nobody shows.
+try:
+    import psutil
+    psutil.cpu_percent(None)      # prime: the first reading is since-boot
+except ImportError:               # pragma: no cover
+    psutil = None
+_TEMP_TOOL = shutil.which("smctemp") or shutil.which("osx-cpu-temp")
+
+
+def _thermal_state():
+    """0 nominal, 1 fair, 2 serious, 3 critical; None if unreadable. The one
+    thermal number macOS hands out without root (ProcessInfo.thermalState),
+    reached through the objc runtime because the CLT python has no PyObjC."""
+    try:
+        import ctypes
+        ctypes.cdll.LoadLibrary(
+            "/System/Library/Frameworks/Foundation.framework/Foundation")
+        objc = ctypes.cdll.LoadLibrary("/usr/lib/libobjc.dylib")
+        objc.objc_getClass.restype = ctypes.c_void_p
+        objc.sel_registerName.restype = ctypes.c_void_p
+        send = objc.objc_msgSend
+        send.restype = ctypes.c_void_p
+        send.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        info = send(objc.objc_getClass(b"NSProcessInfo"),
+                    objc.sel_registerName(b"processInfo"))
+        return int(send(info, objc.sel_registerName(b"thermalState")) or 0)
+    except Exception:
+        return None
+
+
+def sys_metrics():
+    """What /sys answers: percentages are 0..100, sizes are bytes, up is
+    seconds. A key is absent when the machine cannot say."""
+    out = {"t": time.time(), "cpus": os.cpu_count() or 1}
+    try:
+        out["load"] = round(os.getloadavg()[0], 2)
+    except OSError:
+        pass
+    if psutil:
+        out["cpu"] = psutil.cpu_percent(None)         # since the last call
+        m = psutil.virtual_memory()
+        out.update(ram=m.percent, ram_used=m.used, ram_total=m.total)
+        b = psutil.sensors_battery()
+        if b:
+            out["batt"] = b.percent
+        out["up"] = time.time() - psutil.boot_time()
+    elif "load" in out:
+        # ponytail: no psutil, so the 1-minute load per core stands in
+        out["cpu"] = min(100.0, round(100.0 * out["load"] / out["cpus"], 1))
+    d = shutil.disk_usage("/")
+    out.update(disk_free=d.free, disk_total=d.total)
+    ts = _thermal_state()
+    if ts is not None:
+        out["thermal"] = ts
+    if _TEMP_TOOL:
+        try:
+            txt = subprocess.run([_TEMP_TOOL], capture_output=True, text=True,
+                                 timeout=2).stdout
+            out["temp"] = float(re.search(r"\d+(\.\d+)?", txt).group())
+        except Exception:
+            pass
+    return out
+
+
 def read_theme():
     try:
         t = THEME_FILE.read_text().strip()
@@ -427,13 +497,15 @@ def read_bus():
     except (OSError, ValueError):
         pass
     # The mic mode ("ptt" | "open" | "wake", plus "hot" while a wake
-    # follow-up window is live), so faces can show at a glance whether
-    # the room is being listened to. Absent file = no badge.
+    # follow-up window is live, plus "hush" after "stop listening" --
+    # the overlay window hides on that one), so faces can show at a
+    # glance whether the room is being listened to. Absent file = no badge.
     mic = None
     try:
         parts = (BUS / ".voice_mic").read_text().split()
         if parts and parts[0] in ("ptt", "open", "wake", "select"):
-            mic = {"mode": parts[0], "hot": "hot" in parts[1:]}
+            mic = {"mode": parts[0], "hot": "hot" in parts[1:],
+                   "hush": "hush" in parts[1:]}
     except (OSError, ValueError):
         pass
     # Which brain is answering ("claude" | "zai"), published by the voice
@@ -458,9 +530,17 @@ def read_bus():
     except OSError:
         pass
     ready = (BUS / ".voice_ready").exists()
+    # The talk key the face page should bind, published by the voice
+    # line only under ptt_scope "face". Empty = the page binds nothing.
+    ptt_key = ""
+    try:
+        ptt_key = (BUS / ".voice_ptt_key").read_text().strip()[:32]
+    except OSError:
+        pass
     out = {"state": state, "level": level, "samples": samples,
            "stage": stage, "ready": ready, "alert": alert,
-           "loading": loading, "rate_limits": rate_limits}
+           "loading": loading, "rate_limits": rate_limits,
+           "ptt_key": ptt_key}
     if mic:
         out["mic"] = mic
     if brain:
@@ -511,6 +591,19 @@ TYPE_SPECS = {
                  "needs": [["events"]]},
     "timer":    {"span": (2, 2), "fields": {"until", "seconds", "label"},
                  "needs": [["until"], ["seconds"]]},
+    # The time of day, digits sized to the card. Nothing is required: a
+    # bare {"a":"show","type":"clock"} is the whole ask. Exists because
+    # "display a clock" was being answered with hand-written html cards
+    # that came out black-on-dark, screen-sized, then 0.9px tall.
+    "clock":    {"span": (3, 2), "fields": {"label", "format"},
+                 "needs": [[]]},
+    # The machine at a glimpse: CPU and RAM bars, thermal state, disk,
+    # load, battery, uptime. The card polls /sys itself, so the glass
+    # state never churns for a number. Nothing required; label optional.
+    "sysmon":   {"span": (2, 2), "fields": {"label"}, "needs": [[]]},
+    # The assistant's background work (bin/task.py): shown by task.py,
+    # fed by /tasks, dismisses itself when nothing is left.
+    "tasks":    {"span": (3, 1), "fields": {"label"}, "needs": [[]]},
     "list":     {"span": (3, 3), "fields": {"items"}, "needs": [["items"]]},
     "iframe":   {"span": (3, 3), "fields": {"src"}, "needs": [["src"]]},
     "html":     {"span": (3, 3), "fields": {"html"}, "needs": [["html"]]},
@@ -518,11 +611,12 @@ TYPE_SPECS = {
                  "fields": {"q", "count", "tracks", "playlist", "mode"},
                  "needs": [["q"], ["tracks"], ["playlist"]]},
 }
-SHOW_KEYS = {"a", "type", "id", "new", "cell", "span", "ttl", "pin", "title"}
+SHOW_KEYS = {"a", "type", "id", "new", "cell", "span", "ttl", "pin", "title",
+             "raw"}
 VERBS = ("show", "update", "move", "pin", "unpin", "dismiss", "clear",
-         "state")
+         "state", "report")
 STR_FIELDS = {"title", "body", "caption", "label", "html", "q", "src",
-              "until", "view", "mode", "playlist"}
+              "until", "view", "mode", "playlist", "format"}
 NUM_FIELDS = {"zoom", "lat", "lon", "seconds", "count"}
 
 
@@ -698,6 +792,83 @@ def bad_src(src, relative_ok):
     return None
 
 
+# ----------------------------- the camera (§cam) -----------------------------
+# The webcam, live, as a plain image card: {"a":"show","type":"image",
+# "src":"cam.mjpg"}. The card's <img> holds one multipart GET open and the
+# browser repaints on every JPEG part -- MJPEG, the oldest webcam trick,
+# no player, no iframe (a loopback iframe is refused by bad_src for good
+# reason; an <img> cannot escape anything). ffmpeg runs only while a card
+# holds the stream open: the camera light goes off a few seconds after the
+# last card is dismissed or expires. ponytail: 720p30 MJPEG because that is
+# the mode cam-look.sh already proved on this camera; drop the size if the
+# encode ever shows in top.
+CAM_CMD = ["ffmpeg", "-hide_banner", "-loglevel", "error",
+           "-f", "avfoundation", "-framerate", "30",
+           "-pixel_format", "uyvy422", "-video_size", "1280x720", "-i", "0",
+           "-an", "-c:v", "mjpeg", "-q:v", "5", "-f", "mjpeg", "pipe:1"]
+CAM_IDLE_S = 3.0
+_CAM = {"proc": None, "frame": None, "clients": 0,
+        "lock": threading.Lock(), "cv": threading.Condition()}
+
+
+def _cam_pump(proc):
+    """ffmpeg stdout -> the latest whole JPEG, one wake per frame."""
+    buf = b""
+    while True:
+        chunk = proc.stdout.read(65536)
+        if not chunk:
+            break
+        buf += chunk
+        while True:
+            end = buf.find(b"\xff\xd9")            # JPEG end marker
+            if end < 0:
+                break
+            start = buf.find(b"\xff\xd8")          # JPEG start marker
+            frame = buf[start:end + 2] if 0 <= start < end else b""
+            buf = buf[end + 2:]
+            if frame:
+                with _CAM["cv"]:
+                    _CAM["frame"] = frame
+                    _CAM["cv"].notify_all()
+    with _CAM["lock"]:
+        if _CAM["proc"] is proc:
+            _CAM["proc"] = None
+    with _CAM["cv"]:
+        _CAM["cv"].notify_all()                    # viewers: it is over
+
+
+def cam_acquire():
+    """One more viewer; starts ffmpeg for the first. False = no ffmpeg."""
+    with _CAM["lock"]:
+        if _CAM["proc"] is None:
+            if not shutil.which("ffmpeg"):
+                return False
+            _CAM["frame"] = None
+            _CAM["proc"] = subprocess.Popen(
+                CAM_CMD, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL)
+            threading.Thread(target=_cam_pump, args=(_CAM["proc"],),
+                             daemon=True).start()
+        _CAM["clients"] += 1
+    return True
+
+
+def cam_release():
+    with _CAM["lock"]:
+        _CAM["clients"] = max(0, _CAM["clients"] - 1)
+    threading.Timer(CAM_IDLE_S, _cam_idle_stop).start()
+
+
+def _cam_idle_stop():
+    with _CAM["lock"]:
+        if _CAM["clients"] > 0 or _CAM["proc"] is None:
+            return
+        proc, _CAM["proc"] = _CAM["proc"], None
+    proc.terminate()                               # the camera light goes off
+    with _CAM["cv"]:
+        _CAM["cv"].notify_all()
+
+
 # --------------------------- the player (§YouTube) ---------------------------
 # The one place the glass reaches the public internet. No API key and no
 # account: the search reads the same public results page a logged-out browser
@@ -841,6 +1012,142 @@ def has_ctl(s):
     only to forge extra rows or inject escape sequences into the terminal
     readout glass-state.sh prints, the exact surface the agent trusts."""
     return any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in s)
+
+
+# --- html guardrails --------------------------------------------------------
+# An html card is the escape hatch, and tonight it was reached for first: a
+# clock as an html card five times, black-on-dark, screen-sized, 0.9px. The
+# server can recognize the common cases from the markup itself and refuse
+# with the exact native call in the refusal (the model acts on refusals; it
+# does not always read the skill). "raw": true bypasses every check below.
+_CLOCK_TITLE = re.compile(r"\b(clock|chronomet\w*|time of day|current time)\b", re.I)
+_CLOCK_JS = re.compile(r"getHours\(\)|toLocaleTimeString\(|getMinutes\(\)|getSeconds\(\)")
+_TIMER_TITLE = re.compile(r"\b(timer|countdown|count-down)\b", re.I)
+_JS_MEASURED = re.compile(
+    r"(clientWidth|clientHeight|offsetWidth|offsetHeight|getBoundingClientRect)"
+    r"[\s\S]{0,240}(fontSize|font-size)|(fontSize|font-size)[\s\S]{0,240}"
+    r"(clientWidth|clientHeight|offsetWidth|offsetHeight|getBoundingClientRect)")
+_VIEWPORT_UNITS = re.compile(r"\d(\.\d+)?(vh|vw|vmin|vmax)\b")
+_NET_REF = re.compile(r"@import\s|<link[^>]+href=[\"']?https?:|url\(\s*[\"']?https?:", re.I)
+
+
+def native_redirect(title, html):
+    """A native type that clearly IS this html card, or None."""
+    title = title or ""
+    html = html or ""
+    if _CLOCK_TITLE.search(title) or (_CLOCK_JS.search(html)
+                                      and "setInterval" in html):
+        return {"native": {"a": "show", "type": "clock"},
+                "message": ("a clock is a native type: send "
+                            '{"a":"show","type":"clock"} (optional "label", '
+                            '"format":"hm"). It sizes its digits to the card '
+                            "and needs no html. Pass \"raw\": true only for a "
+                            "genuinely different card (a world clock, an uptime "
+                            "counter).")}
+    if _TIMER_TITLE.search(title):
+        return {"native": {"a": "show", "type": "timer", "seconds": 60},
+                "message": ("a countdown is a native type: send "
+                            '{"a":"show","type":"timer","seconds":N} or '
+                            '"until":"<ISO time>" (optional "label"). Pass '
+                            "\"raw\": true only if it is not a countdown.")}
+    if "<table" in html.lower():
+        return {"native": {"component": "table"},
+                "message": ("tables are a prebuilt component: "
+                            "components/component.sh with "
+                            '{"component":"table",...} (see the glass-'
+                            "components skill) renders them themed and "
+                            "sized. Pass \"raw\": true only if the component "
+                            "genuinely cannot express it.")}
+    return None
+
+
+def html_lint(html):
+    """The one certain failure, refused: type sized by measuring boxes in
+    JavaScript. A box measured before it has a height is ~0, and the font
+    follows it (tonight: 0.9px, ticking and invisible)."""
+    if html and _JS_MEASURED.search(html):
+        return ("html sizes its type by measuring boxes in JavaScript "
+                "(clientHeight/getBoundingClientRect -> fontSize); that "
+                "collapses to ~0 when the box has no height yet. Size type "
+                "with container-type:size on a 1fr row and cqh units "
+                "instead (glass-design skill).")
+    return None
+
+
+def html_warnings(html):
+    """Probable failures, allowed but named in the reply."""
+    w = []
+    if not html:
+        return w
+    if _VIEWPORT_UNITS.search(html):
+        w.append("viewport units (vh/vw/vmin) size against the CARD, not the "
+                 "screen, inside this frame -- prefer cqh on a "
+                 "container-type:size row")
+    if _NET_REF.search(html):
+        w.append("network references (@import/<link>/url(http...)) may not "
+                 "load inside the sandboxed frame; the house fonts are "
+                 "available as var(--glass-title-font)/var(--glass-body-font)")
+    if "color" not in html.lower():
+        w.append("no colour set; the shell gives body var(--glass-text), "
+                 "use var(--glass-accent) for the hero value")
+    return w
+
+
+_MD_MARKS = ("**", "`", "\n- ", "\n* ", "\n1. ", "#")
+
+
+def note_span(body):
+    """A note's default span hugs its text: one short line is a 3x1 card
+    with a hero line, a paragraph 3x2, more 3x3. Tonight "hello" sat alone
+    in a 3x2 slab -- the same disease as the clock, native this time."""
+    s = (body or "").strip()
+    lines = [l for l in s.splitlines() if l.strip()]
+    if len(s) <= 48 and len(lines) <= 1 and not any(k in s for k in _MD_MARKS):
+        return (3, 1)
+    if len(s) <= 260 and len(lines) <= 5:
+        return (3, 2)
+    return (3, 3)
+
+
+def render_ok(rd):
+    """False when the measurement says a person cannot read the card as
+    intended: nothing visible, dark text, not laid out, or text that spans
+    under a third of the card. glass.sh turns False into exit 3."""
+    if not rd or not rd.get("laidOut", True) or not rd.get("visible") \
+            or rd.get("dark"):
+        return False
+    h, th = rd.get("h") or 0, rd.get("textH") or 0
+    if h > 0 and th > 0 and (100.0 * th / h) < 34:
+        return False
+    return True
+
+
+def render_line(rd):
+    """The face's measurement of an html card, in one line an agent can act
+    on. One wording, used by the show reply and by glass-state.sh."""
+    if not rd:
+        return "(no report yet -- no face has measured it)"
+    if not rd.get("laidOut", True):
+        return ("not laid out -- the face is hidden or curtained; look again "
+                "once it shows")
+    if not rd.get("visible"):
+        return ("EMPTY -- no visible text (largest font %spx%s)"
+                % (rd.get("fontMax", 0),
+                   ", body height 0" if not rd.get("bodyH") else ""))
+    line = '"%s"  largest text %spx' % ((rd.get("text") or "")[:80],
+                                        rd.get("fontMax"))
+    if rd.get("dark"):
+        line += "  DARK TEXT -- unreadable on the glass"
+    # The vertical extent of the VISIBLE TEXT against the frame: a body is
+    # always 100% tall, but 22px digits alone in a 3x3 card are what "weird
+    # large margins" looks like. Below a third, say so and say the fix.
+    h, th = rd.get("h") or 0, rd.get("textH") or 0
+    if h > 0 and th > 0:
+        fill = min(100, int(round(100.0 * th / h)))
+        if fill < 34:
+            line += ("  text spans only %d%% of the card height -- enlarge "
+                     "the type (cqh) or shrink the span" % fill)
+    return line
 
 
 def check_fields(t, fields):
@@ -1001,6 +1308,8 @@ class GlassModel:
                 reply = self._clear(obj)
             elif a == "state":
                 reply = self._state(obj)
+            elif a == "report":
+                reply = self._report(obj)
             else:
                 reply = _err("unknown_verb",
                              '"a" must be one of: %s' % ", ".join(VERBS))
@@ -1198,6 +1507,10 @@ class GlassModel:
         pinf, e = coerce_bool(obj, "pin")
         if e:
             return _err("bad_field", e, field="pin")
+        rawf, e = coerce_bool(obj, "raw")
+        if e:
+            return _err("bad_field", e, field="raw")
+        warnings = []
         cr = sp = None
         if "cell" in obj:
             cr = parse_cell(obj["cell"])
@@ -1236,6 +1549,15 @@ class GlassModel:
         e = needs_err(t, content, creating=True)
         if e:
             return _err("bad_field", e)
+        if t == "html" and not rawf:
+            nat = native_redirect(obj.get("title"), content.get("html"))
+            if nat:
+                return _err("use_native", nat["message"], native=nat["native"])
+            e = html_lint(content.get("html"))
+            if e:
+                return _err("html_lint", e)
+        if t == "html":
+            warnings = html_warnings(content.get("html"))
         e = check_fields(t, content)
         if e:
             return _err("bad_field", e)
@@ -1263,7 +1585,9 @@ class GlassModel:
                             ids=[it["id"] for it in same])
 
         if sp is None:
-            sp = tuple(target["span"]) if target else TYPE_SPECS[t]["span"]
+            sp = (tuple(target["span"]) if target
+                  else note_span(content.get("body")) if t == "note"
+                  else TYPE_SPECS[t]["span"])
         w, h = sp
         if cr is None and target is not None:
             cr = parse_cell(target["cell"])
@@ -1350,6 +1674,8 @@ class GlassModel:
         reply = {"ok": True, "id": iid, "replaced": replaced,
                  "cell": item["cell"], "span": item["span"],
                  "expires_in": sec(self._left(item))}
+        if warnings:
+            reply["warnings"] = warnings
         if over:
             reply["over_reserve"] = True
         return reply
@@ -1578,6 +1904,55 @@ class GlassModel:
             self._persist()
         return {"ok": True, "cleared": cleared, "kept_pinned": kept}
 
+    def wait_render(self, iid, timeout):
+        """The face's measurement of an html card, waiting up to `timeout`
+        seconds for it. Called OUTSIDE handle()'s lock (from the request
+        thread, after the show reply exists) so the face's own report POST
+        can land meanwhile; each poll takes the lock only to read."""
+        deadline = time.monotonic() + timeout
+        while True:
+            with self.lock:
+                it = self.items.get(iid)
+                rd = it.get("render") if it else None
+            if rd is not None or time.monotonic() >= deadline:
+                return rd
+            time.sleep(0.1)
+
+    def _report(self, obj):
+        """The face's own measurement of what an html card rendered.
+
+        An html card is a sandboxed iframe; the server cannot see into it
+        and neither can the agent that wrote it -- which is how a 0.9px
+        clock got announced as "filling the frame". glass.js injects a
+        probe into every html card that measures its text and posts the
+        numbers here. Stored on the item as "render" (whitelisted, bounded,
+        control characters stripped) so the state verb shows it and
+        glass-state.sh prints a `rendered:` line. Does NOT bump rev: a
+        measurement is not a change to the card."""
+        iid = obj.get("id")
+        it = self.items.get(iid) if isinstance(iid, str) else None
+        if it is None:
+            return _err("unknown_id", "no item with that id is on the glass")
+        rd = obj.get("render")
+        if not isinstance(rd, dict):
+            return _err("bad_field", '"render" must be an object',
+                        field="render")
+        def num(k, hi=100000.0):
+            try:
+                v = float(rd.get(k, 0) or 0)
+            except (TypeError, ValueError):
+                v = 0.0
+            return round(max(0.0, min(hi, v)), 1)
+        text = rd.get("text") if isinstance(rd.get("text"), str) else ""
+        text = re.sub(r"[\x00-\x1f\x7f]", " ", text)[:160]
+        it["render"] = {"laidOut": rd.get("laidOut", True) is not False,
+                        "text": text, "fontMax": num("fontMax"),
+                        "visible": bool(rd.get("visible")),
+                        "dark": bool(rd.get("dark")),
+                        "w": int(num("w")), "h": int(num("h")),
+                        "bodyH": int(num("bodyH")), "textH": int(num("textH"))}
+        return {"ok": True, "id": iid}
+
     def _state(self, obj):
         reserve = self._effective_reserve()
         return {"ok": True, "glass": self._payload(reserve),
@@ -1603,6 +1978,8 @@ class GlassModel:
                         else [])
         if it["_ends_at"] is not None:
             out["ends_in"] = sec(max(0.0, it["_ends_at"] - self.clock()))
+        if it.get("type") == "html":
+            out["rendered"] = render_line(it.get("render"))
         return out
 
     # -- persistence (pinned items + id counters only) ----------------------
@@ -1726,6 +2103,23 @@ class Handler(BaseHTTPRequestHandler):
                     except (OSError, ValueError):
                         pass
                 self._send(json.dumps(payload).encode(), "application/json")
+            elif path == "/tasks":
+                # bin/task.py's records: running, plus the recently ended
+                # so a verdict can linger on the card. Output stays in
+                # the log; the card is a glance, not a console.
+                now, rows = time.time(), []
+                for p in sorted((BUS / ".tasks").glob("t*.json")):
+                    try:
+                        r = json.loads(p.read_text())
+                    except (OSError, ValueError):
+                        continue
+                    if r.get("status") == "running" or now - (r.get("ended") or now) < 120:
+                        rows.append({k: r.get(k) for k in
+                                     ("id", "label", "kind", "status", "started", "ended", "exit")})
+                rows.sort(key=lambda r: r["started"] or 0)
+                self._send(json.dumps({"tasks": rows}).encode(), "application/json")
+            elif path == "/sys":
+                self._send(json.dumps(sys_metrics()).encode(), "application/json")
             elif path == "/chat":
                 try:
                     body = (BUS / ".voice_chat").read_text()
@@ -1733,6 +2127,8 @@ class Handler(BaseHTTPRequestHandler):
                 except (OSError, ValueError):
                     body = '{"rev": 0, "msgs": []}'
                 self._send(body.encode(), "application/json")
+            elif path == "/cam.mjpg":
+                self._cam()
             elif path == "/themes.js":
                 # The theme loader theme.js pulls in: one document.write
                 # per themes/<id>/theme.js, so the theme scripts stay
@@ -1843,7 +2239,7 @@ class Handler(BaseHTTPRequestHandler):
                            "text/plain", 403)
                 return
             if path not in ("/cmd", "/pick", "/theme", "/brain",
-                            "/brainkey", "/stop", "/say", "/media"):
+                            "/brainkey", "/stop", "/say", "/media", "/ptt"):
                 self._send(b"not found", "text/plain", 404)
                 return
             ctype = (self.headers.get("Content-Type") or "") \
@@ -1907,6 +2303,35 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(json.dumps({"ok": ok}).encode(),
                            "application/json", 200)
                 return
+            if path == "/ptt":
+                # The face page's talk key (voice line config ptt_scope
+                # "face"): {"held": bool, "n": press counter}. Re-posted
+                # every 250 ms while held, so the voice line can read a
+                # quiet file as released when a tab dies mid-hold. Same
+                # one-write lane as /say, same JSON-only defense.
+                try:
+                    length = int(self.headers.get("Content-Length") or 0)
+                    if not 0 < length <= 512:
+                        raise ValueError("bad length")
+                    obj = json.loads(self.rfile.read(length))
+                    held = bool(obj.get("held"))
+                    n = int(obj.get("n", 0))
+                except (ValueError, TypeError, AttributeError):
+                    self._send(json.dumps(
+                        {"ok": False, "error": "bad_body"}).encode(),
+                        "application/json", 200)
+                    return
+                try:
+                    tmp = BUS / ".voice_ptt.tmp"
+                    tmp.write_text(json.dumps(
+                        {"held": held, "n": n, "t": time.time()}))
+                    tmp.replace(BUS / ".voice_ptt")
+                    ok = True
+                except OSError:
+                    ok = False
+                self._send(json.dumps({"ok": ok}).encode(),
+                           "application/json", 200)
+                return
             if path == "/say":
                 # P on a face page: the prompt box's line, handed to the
                 # voice line as a typed turn. Same one-write return lane
@@ -1928,10 +2353,13 @@ class Handler(BaseHTTPRequestHandler):
                         {"ok": False, "error": "bad_text"}).encode(),
                         "application/json", 200)
                     return
+                # Appended, one JSON string per line: the file is a queue
+                # the voice line drains, so two messages landing close
+                # together (two finished tasks) both arrive. JSON keeps a
+                # pasted multi-line prompt one message.
                 try:
-                    tmp = BUS / ".voice_typed.tmp"
-                    tmp.write_text(text)
-                    tmp.replace(BUS / ".voice_typed")
+                    with open(BUS / ".voice_typed", "a", encoding="utf-8") as f:
+                        f.write(json.dumps(text) + "\n")
                     ok = True
                 except OSError:
                     ok = False
@@ -2112,6 +2540,16 @@ class Handler(BaseHTTPRequestHandler):
                                  'the server')
                 else:
                     reply = GLASS.handle(obj)
+                    # An html card's reply carries what the face actually rendered: the
+                    # measurement lands in the tool result the model is already reading,
+                    # so a 0.9px clock cannot be announced as done. Waits outside the
+                    # model lock; native types never wait.
+                    if (isinstance(obj, dict) and obj.get("a") == "show"
+                            and obj.get("type") == "html" and reply.get("ok")):
+                        rd = GLASS.wait_render(reply.get("id"), 3.0)
+                        reply["render"] = rd
+                        reply["rendered"] = render_line(rd)
+                        reply["render_ok"] = render_ok(rd) if rd else None
             self._send(json.dumps(reply).encode(), "application/json")
         except ConnectionError:
             # Same family-wide catch as do_GET, same reason.
@@ -2134,6 +2572,42 @@ class Handler(BaseHTTPRequestHandler):
         host = (self.headers.get("Host") or "").strip().lower()
         return host in ("127.0.0.1:%d" % port, "localhost:%d" % port,
                         "[::1]:%d" % port)
+
+    def _cam(self):
+        """One live-camera viewer: hold the connection, write each new
+        frame as a multipart part (see the camera section)."""
+        if not cam_acquire():
+            self._send(b"no camera: ffmpeg is not installed", "text/plain",
+                       503)
+            return
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type",
+                             "multipart/x-mixed-replace; boundary=frame")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            last = None
+            while True:
+                with _CAM["cv"]:
+                    _CAM["cv"].wait_for(
+                        lambda: _CAM["proc"] is None
+                        or (_CAM["frame"] is not None
+                            and _CAM["frame"] is not last), timeout=5)
+                    frame, alive = _CAM["frame"], _CAM["proc"] is not None
+                if frame is None or frame is last:
+                    if not alive:
+                        break           # ffmpeg is gone (camera refused?)
+                    continue
+                last = frame
+                self.wfile.write(b"--frame\r\nContent-Type: image/jpeg\r\n"
+                                 b"Content-Length: %d\r\n\r\n" % len(frame))
+                self.wfile.write(frame)
+                self.wfile.write(b"\r\n")
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass                        # the card went away: normal
+        finally:
+            cam_release()
 
     def _static(self, path):
         if path == "/":
@@ -2208,7 +2682,7 @@ def selfcheck():
     def _(tmp):
         m = model(tmp, "place")
         # Default reserve (center block): the scanner hugs the right rail.
-        r1 = ok(m.handle({"a": "show", "type": "note", "body": "hi"}))
+        r1 = ok(m.handle({"a": "show", "type": "note", "body": "hi\nthere"}))
         assert r1["id"] == "note-1" and r1["cell"] == "J1", r1
         assert r1["span"] == [3, 2] and r1["replaced"] is False
         assert r1["expires_in"] == 180 and r1["viewers"] == 0
@@ -2592,6 +3066,99 @@ def selfcheck():
         ok(m5.handle({"a": "show", "type": "note", "body": "swap"}))
         assert m5.items["note-1"]["rev"] == 2
 
+    @group("report")
+    def _report_group(tmp):
+        m = model(tmp, "report")
+        r = ok(m.handle({"a": "show", "type": "html", "title": "Clock",
+                         "html": "<div style='font-size:0.9px'>23:14:05</div>",
+                         "raw": True}))     # raw: the redirect would refuse a "Clock"
+        hid = r["id"]
+        st = ok(m.handle({"a": "state"}))
+        it = [x for x in st["glass"]["items"] if x["id"] == hid][0]
+        assert "render" not in it, "no report before a face measured it"
+        rev0 = it["rev"]
+        ok(m.handle({"a": "report", "id": hid, "render": {
+            "text": "23:14:05", "fontMax": 0.9, "visible": False,
+            "dark": False, "w": 240, "h": 90, "bodyH": 1, "junk": "x"}}))
+        st = ok(m.handle({"a": "state"}))
+        it = [x for x in st["glass"]["items"] if x["id"] == hid][0]
+        assert it["render"]["visible"] is False and it["render"]["fontMax"] == 0.9
+        assert "junk" not in it["render"], "report fields are whitelisted"
+        assert it["rev"] == rev0, "a measurement must not bump rev"
+        ok(m.handle({"a": "report", "id": hid, "render": {"laidOut": False}}))
+        st = ok(m.handle({"a": "state"}))
+        it = [x for x in st["glass"]["items"] if x["id"] == hid][0]
+        assert it["render"]["laidOut"] is False and it["render"]["visible"] is False
+        refused(m.handle({"a": "report", "id": "nope-9", "render": {}}),
+                "unknown_id")
+        refused(m.handle({"a": "report", "id": hid, "render": "no"}),
+                "bad_field")
+        # the native clock: nothing required, format is a string
+        c = ok(m.handle({"a": "show", "type": "clock"}))
+        assert list(c["span"]) == [3, 2], c
+        ok(m.handle({"a": "show", "type": "clock", "format": "hm",
+                     "label": "Berlin"}))
+        refused(m.handle({"a": "show", "type": "clock", "format": 5}),
+                "bad_field")
+        # the native sysmon: nothing required, and /sys answers in bounds
+        sm = ok(m.handle({"a": "show", "type": "sysmon"}))
+        assert list(sm["span"]) == [2, 2], sm
+        mx = sys_metrics()
+        assert 0 <= mx.get("cpu", 0) <= 100 and mx["disk_total"] > 0, mx
+        assert mx.get("ram", 0) <= 100 and mx.get("thermal", 0) in (0, 1, 2, 3), mx
+        # the native tasks card: nothing required either
+        assert list(ok(m.handle({"a": "show", "type": "tasks"}))["span"]) == [3, 1]
+
+    @group("guardrails")
+    def _guardrails(tmp):
+        m = model(tmp, "guardrails")
+        clockish = ("<div id=c></div><script>setInterval(function(){document."
+                    "getElementById('c').textContent=new Date().getHours()},1000)"
+                    "</script>")
+        r = refused(m.handle({"a": "show", "type": "html", "title": "Chronometer",
+                              "html": "<b>x</b>"}), "use_native")
+        assert r["native"]["type"] == "clock", r
+        r = refused(m.handle({"a": "show", "type": "html", "title": "Stuff",
+                              "html": clockish}), "use_native")
+        assert r["native"]["type"] == "clock", r
+        ok(m.handle({"a": "show", "type": "html", "title": "Chronometer",
+                     "html": "<b>x</b>", "raw": True}))
+        refused(m.handle({"a": "show", "type": "html", "title": "Uptime",
+                          "html": "<div>1<table><tr><td>a</td></tr></table>"}),
+                "use_native")
+        refused(m.handle({"a": "show", "type": "html", "title": "Uptime",
+                          "html": "<div id=b><span id=c>x</span></div><script>"
+                                  "c.style.fontSize=(b.clientHeight/10)+'px'"
+                                  "</script>"}), "html_lint")
+        r = ok(m.handle({"a": "show", "type": "html", "title": "Moon",
+                         "html": "<div style='font-size:14vh'>63%</div>"}))
+        assert any("viewport" in w for w in r.get("warnings", [])), r
+        assert render_line(None).startswith("(no report")
+        assert render_line({"laidOut": False}).startswith("not laid out")
+        assert render_line({"visible": False, "fontMax": 0.9, "bodyH": 0}) \
+            == "EMPTY -- no visible text (largest font 0.9px, body height 0)"
+        assert "DARK TEXT" in render_line({"visible": True, "dark": True,
+                                           "text": "x", "fontMax": 16})
+        assert "spans only 20%" in render_line({"visible": True, "text": "x",
+                                                "fontMax": 40, "h": 200, "textH": 40})
+        assert "spans only" not in render_line({"visible": True, "text": "x",
+                                                "fontMax": 40, "h": 200, "textH": 120})
+        assert render_ok({"visible": True, "text": "x", "fontMax": 40, "h": 200, "textH": 120})
+        assert not render_ok({"visible": True, "text": "x", "fontMax": 22, "h": 244, "textH": 21})
+        assert not render_ok({"visible": True, "dark": True, "text": "x", "fontMax": 16})
+        assert not render_ok(None) and not render_ok({"laidOut": False})
+        assert note_span("hello") == (3, 1)
+        assert note_span("a" * 100) == (3, 2) and note_span("**bold**") == (3, 2)
+        assert note_span("x\n" * 8) == (3, 3)
+        n1 = ok(m.handle({"a": "show", "type": "note", "body": "hello"}))
+        assert list(n1["span"]) == [3, 1], n1
+        n2 = ok(m.handle({"a": "show", "type": "note", "body": "hello", "new": True, "span": [2, 2]}))
+        assert list(n2["span"]) == [2, 2], "an explicit span wins"
+        assert m.wait_render(r["id"], 0.15) is None
+        st = ok(m.handle({"a": "state"}))
+        it = [x for x in st["glass"]["items"] if x["id"] == r["id"]][0]
+        assert it["rendered"].startswith("(no report"), it
+
     @group("guards")
     def _(tmp):
         global GLASS
@@ -2808,6 +3375,23 @@ def selfcheck():
                 assert got == want, "%r -> %r" % (token, got)
             (BUS / ".voice_brain").unlink()
             assert "brain" not in read_bus()
+            # .voice_mic: the mode, then the optional hot / hush tokens.
+            # The overlay window hides on hush ("stop listening"), so the
+            # token has to survive the trip; an unknown mode is no badge.
+            for token, want in (
+                    ("wake", {"mode": "wake", "hot": False, "hush": False}),
+                    ("wake hot", {"mode": "wake", "hot": True,
+                                  "hush": False}),
+                    ("wake hush", {"mode": "wake", "hot": False,
+                                   "hush": True}),
+                    ("ptt hush", {"mode": "ptt", "hot": False,
+                                  "hush": True}),
+                    ("radio hush", None)):
+                (BUS / ".voice_mic").write_text(token)
+                got = read_bus().get("mic")
+                assert got == want, "%r -> %r" % (token, got)
+            (BUS / ".voice_mic").unlink()
+            assert "mic" not in read_bus()
 
             # /config carries the STATUS the BRAIN tab renders -- and only
             # ever a bool, four characters, and the Claude login flag.

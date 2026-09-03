@@ -20,8 +20,8 @@
 # Same port resolution as glass.sh: the server's config, the server's
 # precedence ("port" in ai-visualizer.json, else 8790), and no flag to
 # disagree with it.
-PORT="$(python3 -c 'import json,sys; print(int(json.load(open(sys.argv[1])).get("port", 8790)))' \
-        "$(dirname "$0")/../ai-visualizer.json" 2>/dev/null || echo 8790)"
+PORT="${GLASS_PORT:-$(python3 -c 'import json,sys; print(int(json.load(open(sys.argv[1])).get("port", 8790)))' \
+        "$(dirname "$0")/../ai-visualizer.json" 2>/dev/null || echo 8790)}"
 URL="http://127.0.0.1:$PORT/cmd"
 
 # state is a /cmd verb like any other, and the Content-Type is what
@@ -103,6 +103,27 @@ if items:
         if it.get("flags"):
             line += "  [%s]" % ",".join(it["flags"])
         print(line)
+        # What an html card ACTUALLY rendered, measured by the card itself
+        # (glass.js injects a probe into every html iframe; the face posts
+        # its report back). This is the line an agent reads before it says
+        # "it is up": a 0.9px clock is ticking and invisible at once.
+        if it.get("type") == "html":
+            rd = it.get("render")
+            if it.get("rendered"):
+                print("      rendered: %s" % esc(it["rendered"]))
+            elif not rd:
+                print("      rendered: (no report yet -- no face has measured it)")
+            elif not rd.get("laidOut", True):
+                print("      rendered: (not laid out -- the face is hidden or curtained; "
+                      "look again once it shows)")
+            elif not rd.get("visible"):
+                print("      rendered: EMPTY -- no visible text (largest font %spx%s)"
+                      % (rd.get("fontMax", 0),
+                         ", body height 0" if not rd.get("bodyH") else ""))
+            else:
+                print("      rendered: \"%s\"  largest text %spx%s"
+                      % (esc(rd.get("text") or "")[:80], rd.get("fontMax"),
+                         "  DARK TEXT -- unreadable on the glass" if rd.get("dark") else ""))
 free = r.get("free") or {}
 if free:
     print("free: " + ", ".join(("%s at %s" % (k, v)) if v else ("%s no room" % k)
